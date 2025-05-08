@@ -70,10 +70,12 @@ async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: 
     try:
         run_config = CrawlerRunConfig(
             cache_mode=CacheMode.ENABLED,
-            page_timeout=45000,
-            # Remove wait_for to avoid timeout issues on inconsistent pages
-            # wait_for="css:h1[class*='kt-page-title__title']",
-            delay_before_return_html=3.0 # Rely on delay
+            page_timeout=60000, # Slightly increase timeout for scrolling
+            # Remove wait_for
+            delay_before_return_html=1.0, # Reduce delay if scanning page
+            # --- ADD scan_full_page ---
+            scan_full_page=True,
+            scroll_delay=0.3 # Small delay between scroll steps
         )
         result = await crawler.arun(url=detail_url, config=run_config)
 
