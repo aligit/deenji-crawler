@@ -6,41 +6,72 @@ from dotenv import load_dotenv
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
-pool = None
+# Keep module-level variable primarily for closing, but ensure functions get it passed
+_pool: asyncpg.Pool | None = None
 
-async def init_db_pool():
-    """Initializes the database connection pool."""
-    global pool
-    if pool is None:
-        try:
-            pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-            logging.info("Database pool initialized.")
-        except Exception as e:
-            logging.error(f"Error initializing database pool: {e}")
-            raise
-    return pool
+async def init_db_pool() -> asyncpg.Pool | None:
+    """Initializes the database connection pool and returns it."""
+    global _pool # Reference the module-level variable for assignment
+    # Prevent re-initialization if already connected
+    if _pool is not None and not _pool.is_closing():
+         logging.info("Database pool already initialized.")
+         return _pool
+
+    if not DATABASE_URL:
+        logging.error("DATABASE_URL environment variable not set.")
+        _pool = None
+        return None
+
+    try:
+        logging.info(f"Attempting to create database pool for: {DATABASE_URL[:DATABASE_URL.find('@')]}...")
+        pool_instance = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10, timeout=30)
+        # Verify connection
+        async with pool_instance.acquire() as conn:
+             await conn.execute('SELECT 1')
+        logging.info("Database pool initialized and connection verified.")
+        _pool = pool_instance # Assign to module-level variable
+        return _pool # Return the created pool
+    except (asyncpg.exceptions.InvalidConnectionParametersError,
+            asyncpg.exceptions.CannotConnectNowError,
+            ConnectionRefusedError,
+            TimeoutError,
+            OSError) as e:
+        logging.error(f"Error initializing database pool: {type(e).__name__} - {e}")
+        logging.error("Please check your DATABASE_URL, network connectivity, and Supabase/Postgres server status.")
+        _pool = None
+        return None
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during pool initialization: {e}", exc_info=True)
+        _pool = None
+        return None
 
 async def close_db_pool():
     """Closes the database connection pool."""
-    global pool
-    if pool:
-        await pool.close()
-        logging.info("Database pool closed.")
-        pool = None
+    global _pool
+    if _pool and not _pool._closed:
+        try:
+            await _pool.close()
+            logging.info("Database pool closed.")
+        except Exception as e:
+            logging.error(f"Error closing database pool: {e}", exc_info=True)
+        finally:
+             _pool = None
+    else:
+         logging.info("Database pool was already closed or not initialized.")
+
 
 async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
     """Calls the import_mongodb_property function in PostgreSQL."""
-    external_id = property_data.get("p_external_id") # Get ID early for logging
+    # (Function content remains the same as the previous version)
+    external_id = property_data.get("p_external_id")
     try:
-        # Ensure JSON fields are correctly formatted
+        # ... (JSON formatting and None handling as before) ...
         location_json = json.dumps(property_data.get("p_location")) if property_data.get("p_location") else None
-        # Use ensure_ascii=False for Persian text in JSON
         attributes_json = json.dumps(property_data.get("p_attributes", []), ensure_ascii=False)
         image_urls_json = json.dumps(property_data.get("p_image_urls", []))
         highlight_flags_json = json.dumps(property_data.get("p_highlight_flags", []), ensure_ascii=False)
         similar_properties_json = json.dumps(property_data.get("p_similar_properties", []))
 
-        # Handle potential None values for numeric/int fields expected by DB
         price = property_data.get("p_price")
         investment_score = property_data.get("p_investment_score")
         neighborhood_fit_score = property_data.get("p_neighborhood_fit_score")
@@ -56,9 +87,9 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
             )
             """,
             external_id,
-            property_data.get("p_title", "N/A"), # Provide default for title
+            property_data.get("p_title", "N/A"),
             property_data.get("p_description"),
-            price, # Pass potentially None price
+            price,
             location_json,
             attributes_json,
             image_urls_json,
@@ -75,11 +106,8 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
          logging.warning(f"[{external_id}] Property already exists. Skipping or update handled by DB.")
          return None
     except Exception as e:
-        logging.error(f"[{external_id}] Error saving property to DB: {e}", exc_info=True) # Add exc_info
-        # Log the specific data structure being sent
-        loggable_data = {k: (v if len(str(v)) < 200 else str(v)[:197] + '...') # Truncate long strings
+        logging.error(f"[{external_id}] Error saving property to DB: {e}", exc_info=True)
+        loggable_data = {k: (v if len(str(v)) < 200 else str(v)[:197] + '...')
                          for k, v in property_data.items()}
         logging.error(f"[{external_id}] Data causing error (truncated): {json.dumps(loggable_data, indent=2, ensure_ascii=False)}")
         return None
-
-# ... (rest of db_utils.py: close_db_pool) ...
