@@ -54,8 +54,7 @@ async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: 
     """Crawls a single property, saves data to JSON, and attempts DB save."""
     if not db_pool:
         logging.error(f"[{token}] Database pool is not available. Cannot acquire connection.")
-        # Decide if you want to still attempt extraction and JSON save even if DB isn't available
-        # Let's proceed to crawl but skip DB saving later.
+        # We'll proceed to crawl but skip DB saving later
 
     if not token:
          logging.warning("Skipping widget, missing token.")
@@ -68,26 +67,47 @@ async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: 
     extracted_data = None
 
     try:
+        # IMPROVED: More robust crawler configuration to handle dynamic content
         run_config = CrawlerRunConfig(
-            cache_mode=CacheMode.ENABLED,
-            page_timeout=60000, # Slightly increase timeout for scrolling
-            # Remove wait_for
-            delay_before_return_html=1.0, # Reduce delay if scanning page
-            # --- ADD scan_full_page ---
-            scan_full_page=True,
-            scroll_delay=0.3 # Small delay between scroll steps
+            cache_mode=CacheMode.BYPASS,  # Always get fresh content
+            page_timeout=90000,  # Longer timeout (90 seconds) for slow loading pages
+            delay_before_return_html=2.0,  # Increased delay to ensure content loads
+            scan_full_page=True,  # Ensures all content is loaded
+            scroll_delay=0.5,  # Slightly longer delay between scrolls
+            remove_overlay_elements=True,  # Remove any popup overlays
+            js_code=[
+                # Force scroll to bottom to trigger lazy loading
+                "window.scrollTo(0, document.body.scrollHeight);",
+                # Wait a bit, then scroll back up to help with revealing content
+                "setTimeout(() => window.scrollTo(0, 0), 500);"
+            ],
+            # Wait for critical elements to load
+            wait_for="css:div.kt-page-title, h1[class*='kt-page-title__title'], div.kt-carousel__cell",
+            magic=True  # Enable auto-handling of popups, etc.
         )
+        
+        # Execute the crawl with improved configuration
         result = await crawler.arun(url=detail_url, config=run_config)
 
-        if result.success and result.html: # Use raw HTML
+        if result.success and result.html:
             logging.info(f"[{token}] Crawl successful. Parsing RAW HTML (length: {len(result.html)})...")
-            extracted_data = extract_property_details(result.html, token) # Pass result.html
+            extracted_data = extract_property_details(result.html, token)  # Pass result.html
             if extracted_data:
-                db_data = transform_for_db(extracted_data) # Try transforming even if DB is down
+                db_data = transform_for_db(extracted_data)  # Try transforming even if DB is down
                 if not db_data:
                     logging.warning(f"[{token}] Failed to transform data for DB (missing title/id?).")
             else:
                 logging.warning(f"[{token}] Failed to extract details from HTML for URL {detail_url}.")
+                
+                # IMPROVED: Save problematic HTML for debugging
+                if not extracted_data:
+                    debug_filename = Path(JSON_OUTPUT_DIR) / f"{token}_failed.html"
+                    try:
+                        await asyncio.to_thread(lambda: Path(debug_filename).write_text(result.html, encoding='utf-8'))
+                        logging.info(f"[{token}] Saved problematic HTML to {debug_filename} for debugging")
+                    except Exception as err:
+                        logging.error(f"[{token}] Failed to save debug HTML: {err}")
+                        
         elif result.success:
              logging.warning(f"[{token}] Crawl successful but no HTML content found for {detail_url}. Status: {result.status_code}")
         else:

@@ -36,91 +36,175 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
     logging.debug(f"[{token}] Starting HTML parsing. Content length: {len(html_content)}")
 
     try:
-        # --- Extract Title (Keep previous robust logic) ---
+        # --- IMPROVED Title Extraction Logic ---
         title = None
-        # ... (keep all title fallbacks from previous version) ...
-        title_tag = soup.select_one("h1.kt-page-title__title.kt-page-title__title--responsive-sized")
-        if not title_tag: title_tag = soup.select_one("h1[class*='kt-page-title__title']")
-        if not title_tag:
+        # Try multiple selectors with more variations
+        title_selectors = [
+            "h1.kt-page-title__title.kt-page-title__title--responsive-sized",
+            "h1[class*='kt-page-title__title']",
+            "div.kt-page-title h1",
+            "div.kt-page-title__texts h1",
+            "div[class*='kt-page-title'] h1",
+            "h1"  # Last resort: any h1
+        ]
+        
+        for selector in title_selectors:
+            title_tag = soup.select_one(selector)
+            if title_tag:
+                title = title_tag.get_text(strip=True)
+                logging.debug(f"[{token}] Found title using selector: {selector}")
+                break
+                
+        # If still no title, try additional fallbacks
+        if not title:
+            # Try main content areas
             main_content_areas = ['main', 'article', "div[class*='kt-col-5']"]
             for area_selector in main_content_areas:
-                area = soup.select_one(area_selector); h1 = area.find('h1') if area else None
-                if h1: title_tag = h1; logging.debug(f"[{token}] Found title via fallback {area_selector} > h1"); break
-        if not title_tag: title_tag = soup.find('title')
-
-        if title_tag:
-            title = title_tag.get_text(strip=True)
-            if title_tag.name == 'title': title = title.split('|')[0].split('-')[0].strip()
-            details['title'] = title if title else 'N/A'
-        else: details['title'] = 'N/A'
-
-        if details['title'] == 'N/A': logging.warning(f"[{token}] Title extraction FAILED.")
-        else: logging.info(f"[{token}] Extracted Title: '{details['title'][:50]}...'")
-
-
-        # --- Extract Description (NEW Robust Selectors) ---
-        description = None
-        # 1. Try the highly specific selector provided by user (slightly adapted for robustness)
-        desc_tag = soup.select_one("div[class*='kt-description-row'] > div > p[class*='kt-description-row__text']")
-        if desc_tag:
-            description = desc_tag.get_text(separator='\n', strip=True)
-            logging.debug(f"[{token}] Found description using user's specific selector pattern.")
+                area = soup.select_one(area_selector)
+                h1 = area.find('h1') if area else None
+                if h1:
+                    title_tag = h1
+                    title = title_tag.get_text(strip=True)
+                    logging.debug(f"[{token}] Found title via fallback {area_selector} > h1")
+                    break
+                    
+            # Try page title as last resort
+            if not title:
+                title_tag = soup.find('title')
+                if title_tag:
+                    title = title_tag.get_text(strip=True)
+                    title = title.split('|')[0].split('-')[0].strip()
+                    logging.debug(f"[{token}] Found title from page <title> tag")
+        
+        # Clean up title if found
+        if title:
+            # Remove any extra whitespace or line breaks
+            title = ' '.join(title.split())
+            details['title'] = title
         else:
-            # 2. Try the less specific class provided by user
-            desc_tag = soup.select_one("p.kt-description-row__text--primary")
-            if desc_tag:
-                description = desc_tag.get_text(separator='\n', strip=True)
-                logging.debug(f"[{token}] Found description using primary text class.")
-            else:
-                # 3. Fallback: Find the 'توضیحات' heading and the description row after it
-                desc_title_row = soup.find(lambda tag: tag.name in ['h2', 'div', 'span'] and \
-                                           'توضیحات' in tag.get_text(strip=True) and \
-                                           'title' in tag.get('class', []))
-                if desc_title_row:
-                     desc_row = desc_title_row.find_next_sibling('div', class_=lambda c: c and 'kt-description-row' in c)
-                     if desc_row:
-                          desc_p = desc_row.find('p') # Find first <p> within that row
-                          if desc_p:
-                               description = desc_p.get_text(separator='\n', strip=True)
-                               logging.debug(f"[{token}] Found description using 'توضیحات' title fallback.")
+            details['title'] = 'N/A'
+            
+        if details['title'] == 'N/A':
+            logging.warning(f"[{token}] Title extraction FAILED.")
+        else:
+            logging.info(f"[{token}] Extracted Title: '{details['title'][:50]}...'")
 
-                # 4. Fallback: Any paragraph inside the main content column with significant text
-                if not description:
-                     main_col = soup.select_one("div[class*='kt-col-5']") # Divar often uses kt-col-5 for main info
-                     if main_col:
-                          possible_desc_tags = main_col.find_all('p', limit=10) # Limit search depth
-                          for p_tag in possible_desc_tags:
-                              p_text = p_tag.get_text(strip=True)
-                              if len(p_text) > 50: # Heuristic: description is usually longer
-                                   # Avoid paragraphs that are clearly attribute values
-                                   prev_sibling = p_tag.find_previous_sibling()
-                                   if not (prev_sibling and 'title' in prev_sibling.get('class',[])):
-                                        description = p_text
-                                        logging.debug(f"[{token}] Found description using general main column paragraph fallback.")
-                                        break
-        details['description'] = description if description else ''
-        if not details['description']: logging.warning(f"[{token}] Description extraction FAILED.")
-        else: logging.info(f"[{token}] Extracted Description: '{details['description'][:50]}...'")
+        # --- IMPROVED Description Extraction Logic ---
+        description = None
+        
+        # 1. Try a broader range of description selectors
+        description_selectors = [
+            # Specific selectors
+            "div[class*='kt-description-row'] > div > p[class*='kt-description-row__text']",
+            "p.kt-description-row__text--primary",
+            "div.kt-base-row.kt-base-row--large.kt-description-row div.kt-base-row__start p",
+            "div.kt-base-row.kt-base-row--large.kt-description-row p",
+            # More general selectors
+            "div[class*='description'] p",
+            "div[class*='kt-description'] p",
+            "div[class*='description-row'] p"
+        ]
+        
+        for selector in description_selectors:
+            desc_elements = soup.select(selector)
+            if desc_elements:
+                # Combine all matching elements
+                description = '\n'.join([elem.get_text(strip=True) for elem in desc_elements if elem.get_text(strip=True)])
+                if description:
+                    logging.debug(f"[{token}] Found description using selector: {selector}")
+                    break
+        
+        # 2. If still no description, try finding by heading text
+        if not description:
+            # Look for heading with "توضیحات" (description in Persian)
+            description_headings = soup.find_all(['h2', 'h3', 'div', 'span'], 
+                                               string=lambda s: s and 'توضیحات' in s)
+            
+            for heading in description_headings:
+                # Try to find description in siblings or parent's children
+                desc_container = None
+                
+                # Check next siblings
+                desc_container = heading.find_next_sibling(['div', 'p'])
+                
+                # If not found, check parent's children after this element
+                if not desc_container and heading.parent:
+                    siblings = list(heading.parent.children)
+                    try:
+                        idx = siblings.index(heading)
+                        if idx < len(siblings) - 1:
+                            desc_container = siblings[idx + 1]
+                    except ValueError:
+                        pass
+                
+                # If found a container, extract text
+                if desc_container:
+                    desc_text = desc_container.get_text(strip=True)
+                    if len(desc_text) > 30:  # Minimum length for description
+                        description = desc_text
+                        logging.debug(f"[{token}] Found description after heading: {heading.get_text(strip=True)}")
+                        break
+        
+        # 3. Last resort: Find any substantial paragraph in the main content
+        if not description:
+            # First, identify the main content column
+            main_columns = soup.select("div[class*='kt-col-5'], div[class*='kt-col-6'], article, main")
+            
+            for main_col in main_columns:
+                # Find all paragraphs with substantial text
+                paragraphs = main_col.find_all('p')
+                substantial_paragraphs = [p for p in paragraphs 
+                                         if len(p.get_text(strip=True)) > 80 
+                                         and not p.find_parent(['header', 'footer', 'nav'])]
+                
+                if substantial_paragraphs:
+                    # Use the longest paragraph as the description
+                    substantial_paragraphs.sort(key=lambda p: len(p.get_text(strip=True)), reverse=True)
+                    description = substantial_paragraphs[0].get_text(strip=True)
+                    logging.debug(f"[{token}] Found description using longest paragraph in main content")
+                    break
+        
+        # Clean up and store description
+        if description:
+            # Normalize whitespace
+            description = ' '.join(description.split())
+            details['description'] = description
+        else:
+            details['description'] = ''
+            
+        if not details['description']:
+            logging.warning(f"[{token}] Description extraction FAILED.")
+        else:
+            logging.info(f"[{token}] Extracted Description: '{details['description'][:50]}...'")
 
-
-        # --- Images, Location, Attributes, Prices (Keep previous improved logic) ---
-        # ... (Image logic) ...
-        image_urls = []; picture_tags = soup.select('div[class*=kt-carousel] picture img[src*="divarcdn"]')
+        # --- Images, Location, Attributes, Prices (Keep existing logic) ---
+        image_urls = []
+        picture_tags = soup.select('div[class*=kt-carousel] picture img[src*="divarcdn"]')
         for img in picture_tags:
-            src = img.get('src'); srcset = img.get('srcset')
-            if srcset: sources = [s.strip().split(' ')[0] for s in srcset.split(',')]; src = sources[-1] if sources else src
-            if src and src not in image_urls: image_urls.append(src)
-        details['image_urls'] = image_urls; logging.debug(f"[{token}] Found {len(image_urls)} images.")
+            src = img.get('src')
+            srcset = img.get('srcset')
+            if srcset:
+                sources = [s.strip().split(' ')[0] for s in srcset.split(',')]
+                src = sources[-1] if sources else src
+            if src and src not in image_urls:
+                image_urls.append(src)
+        details['image_urls'] = image_urls
+        logging.debug(f"[{token}] Found {len(image_urls)} images.")
 
-        # ... (Location logic) ...
-        location = None; script_tags_ld = soup.find_all('script', type='application/ld+json')
-        # ... (Loop through ld+json, then check PRELOADED_STATE as before) ...
+        # --- Location logic (keep your existing implementation) ---
+        location = None
+        script_tags_ld = soup.find_all('script', type='application/ld+json')
+        # Process location from script tags
+        # [Keep your existing code here]
         details['location'] = location
-        if not location: logging.warning(f"[{token}] Location extraction failed.")
+        if not location:
+            logging.warning(f"[{token}] Location extraction failed.")
 
-        # ... (Attribute and Price logic - this ALREADY captures key-value pairs) ...
-        attributes = []; processed_titles = set()
+        # --- Attribute and Price logic (keep your existing implementation) ---
+        attributes = []
+        processed_titles = set()
         price, price_per_meter, area, year_built, bedrooms = None, None, None, None, None
+        
         # Selectors targeting rows/items likely containing key-value data
         possible_rows = soup.select("div[class*='unexpandable-row'], div[class*='group-row-item'], li[class*='attribute-'], dl > div")
         logging.debug(f"[{token}] Found {len(possible_rows)} potential attribute/info rows.")
@@ -128,12 +212,17 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
         for row in possible_rows:
             title_el = row.find(['p', 'span', 'dt', 'div'], class_=lambda c: c and ('title' in c.lower() or 'label' in c.lower()))
             value_el = row.find(['p', 'span', 'dd', 'div'], class_=lambda c: c and ('value' in c.lower() or 'data' in c.lower()))
+            
             # Fallback sibling logic
-            if not value_el and title_el: value_el = title_el.find_next_sibling(['p', 'span', 'dd', 'div'])
-            if not title_el and value_el: title_el = value_el.find_previous_sibling(['p', 'span', 'dt', 'div'])
+            if not value_el and title_el:
+                value_el = title_el.find_next_sibling(['p', 'span', 'dd', 'div'])
+            if not title_el and value_el:
+                title_el = value_el.find_previous_sibling(['p', 'span', 'dt', 'div'])
 
             is_group_item = 'group-row-item' in row.get('class', [])
-            if not title_el and not value_el and is_group_item: title_el = row.find('span', class_='kt-group-row-item__title'); value_el = row
+            if not title_el and not value_el and is_group_item:
+                title_el = row.find('span', class_='kt-group-row-item__title')
+                value_el = row
 
             title = title_el.get_text(strip=True).strip().rstrip(':').strip() if title_el else None
             value_text_raw = value_el.get_text(strip=True) if value_el else None
@@ -144,44 +233,69 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
                 parsed_num = parse_persian_number(value.replace(' تومان', '')) if value else None
 
                 # Assign core fields
-                if title == 'متراژ': area = parsed_num
-                elif title == 'ساخت': year_built = parsed_num
-                elif title == 'اتاق': bedrooms = parsed_num
-                elif 'قیمت کل' in title: price = parsed_num
-                elif 'قیمت هر متر' in title: price_per_meter = parsed_num
+                if title == 'متراژ':
+                    area = parsed_num
+                elif title == 'ساخت':
+                    year_built = parsed_num
+                elif title == 'اتاق':
+                    bedrooms = parsed_num
+                elif 'قیمت کل' in title:
+                    price = parsed_num
+                elif 'قیمت هر متر' in title:
+                    price_per_meter = parsed_num
 
                 # Extract key for boolean/enum attributes
-                key = None; icon_tag = row.find('i', class_=lambda c: c and 'kt-icon-' in c)
+                key = None
+                icon_tag = row.find('i', class_=lambda c: c and 'kt-icon-' in c)
                 if icon_tag and icon_tag.get('class'):
                     for css_class in icon_tag['class']:
                         if 'kt-icon-' in css_class:
                             key_candidate = css_class.split('kt-icon-')[-1].upper().replace('-', '_')
-                            if len(key_candidate) > 2 and not any(c.isdigit() for c in key_candidate): key = key_candidate; break
+                            if len(key_candidate) > 2 and not any(c.isdigit() for c in key_candidate):
+                                key = key_candidate
+                                break
 
-                # Add to generic attributes list (THIS IS THE KEY-VALUE PAIR LOGIC)
+                # Add to generic attributes list
                 attr_dict = {"title": title}
-                if value is not None: attr_dict["value"] = value # Include None values if that's useful
+                if value is not None:
+                    attr_dict["value"] = value
                 if key:
                     attr_dict["key"] = key
-                    if value is None and any(neg in title for neg in ["ندارد", "نیست", "فاقد"]): attr_dict["available"] = False
-                    elif value is None: attr_dict["available"] = True
-                attributes.append(attr_dict); processed_titles.add(title)
+                    if value is None and any(neg in title for neg in ["ندارد", "نیست", "فاقد"]):
+                        attr_dict["available"] = False
+                    elif value is None:
+                        attr_dict["available"] = True
+                
+                attributes.append(attr_dict)
+                processed_titles.add(title)
 
-        details['price'] = price; details['price_per_meter'] = price_per_meter
-        details['area'] = area; details['year_built'] = year_built; details['bedrooms'] = bedrooms
-        # The 'attributes' list contains all the key-value pairs found
+        details['price'] = price
+        details['price_per_meter'] = price_per_meter
+        details['area'] = area
+        details['year_built'] = year_built
+        details['bedrooms'] = bedrooms
         details['attributes'] = attributes
+        
         logging.debug(f"[{token}] Parsed area: {area}, year: {year_built}, beds: {bedrooms}, price: {price}")
         logging.debug(f"[{token}] Extracted {len(attributes)} generic attributes.")
 
-        if details['title'] == 'N/A': logging.error(f"[{token}] Critical data (Title) not extracted.")
+        if details['title'] == 'N/A':
+            logging.error(f"[{token}] Critical data (Title) not extracted.")
 
         logging.info(f"[{token}] Successfully parsed details for: '{details.get('title', 'N/A')[:50]}...'")
         return details
 
     except Exception as e:
         logging.error(f"[{token}] Error during BeautifulSoup parsing: {e}", exc_info=True)
-        # ... (debug html saving logic) ...
+        # Save debug HTML if needed
+        if logging.getLogger().level <= logging.DEBUG:
+            debug_filename = Path(JSON_OUTPUT_DIR) / f"{token}_error.html"
+            try:
+                with open(debug_filename, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+                logging.debug(f"[{token}] Saved debug HTML to {debug_filename}")
+            except Exception as debug_e:
+                logging.debug(f"[{token}] Could not save debug HTML: {debug_e}")
         return None
 
 
