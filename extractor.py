@@ -177,7 +177,7 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
         else:
             logging.info(f"[{token}] Extracted Description: '{details['description'][:50]}...'")
 
-        # --- Images, Location, Attributes, Prices (Keep existing logic) ---
+        # --- Images, Location, Attributes, Prices ---
         image_urls = []
         picture_tags = soup.select('div[class*=kt-carousel] picture img[src*="divarcdn"]')
         for img in picture_tags:
@@ -191,7 +191,7 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
         details['image_urls'] = image_urls
         logging.debug(f"[{token}] Found {len(image_urls)} images.")
 
-        # --- Location logic (keep your existing implementation) ---
+        # --- Location logic ---
         location = None
         script_tags_ld = soup.find_all('script', type='application/ld+json')
         # Process location from script tags
@@ -200,10 +200,41 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
         if not location:
             logging.warning(f"[{token}] Location extraction failed.")
 
-        # --- Attribute and Price logic (keep your existing implementation) ---
+        # --- Enhanced Attribute and Price logic ---
         attributes = []
         processed_titles = set()
         price, price_per_meter, area, year_built, bedrooms = None, None, None, None, None
+        land_area, property_type = None, None  # New fields
+        has_parking, has_storage, has_balcony = False, False, False  # New boolean flags
+        title_deed_type, building_direction, renovation_status = None, None, None
+        floor_material, bathroom_type, cooling_system = None, None, None
+        heating_system, hot_water_system = None, None
+        
+        # Enhanced mapping of attribute titles to field names
+        field_mapping = {
+            'متراژ': 'area',
+            'متراژ زمین': 'land_area',
+            'نوع ملک': 'property_type',
+            'ساخت': 'year_built',
+            'اتاق': 'bedrooms',
+            'قیمت کل': 'price',
+            'قیمت هر متر': 'price_per_meter',
+            'پارکینگ': 'has_parking',
+            'انباری': 'has_storage',
+            'بالکن': 'has_balcony'
+        }
+        
+        # Additional details mapping for the modal dialog
+        advanced_field_mapping = {
+            'سند': 'title_deed_type',
+            'جهت ساختمان': 'building_direction',
+            'وضعیت واحد': 'renovation_status',
+            'جنس کف': 'floor_material',
+            'سرویس بهداشتی': 'bathroom_type',
+            'سرمایش': 'cooling_system',
+            'گرمایش': 'heating_system',
+            'تأمین‌کننده آب گرم': 'hot_water_system'
+        }
         
         # Selectors targeting rows/items likely containing key-value data
         possible_rows = soup.select("div[class*='unexpandable-row'], div[class*='group-row-item'], li[class*='attribute-'], dl > div")
@@ -232,17 +263,22 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
                 logging.debug(f"[{token}] Processing row: Title='{title}', Value='{value}'")
                 parsed_num = parse_persian_number(value.replace(' تومان', '')) if value else None
 
-                # Assign core fields
-                if title == 'متراژ':
-                    area = parsed_num
-                elif title == 'ساخت':
-                    year_built = parsed_num
-                elif title == 'اتاق':
-                    bedrooms = parsed_num
-                elif 'قیمت کل' in title:
-                    price = parsed_num
-                elif 'قیمت هر متر' in title:
-                    price_per_meter = parsed_num
+                # Map known fields based on our mappings
+                if title in field_mapping:
+                    field_name = field_mapping[title]
+                    
+                    # Handle numeric fields
+                    if field_name in ['area', 'land_area', 'year_built', 'bedrooms', 'price', 'price_per_meter']:
+                        locals()[field_name] = parsed_num
+                    # Handle boolean fields
+                    elif field_name in ['has_parking', 'has_storage', 'has_balcony']:
+                        # Set to True if exists in any form (could enhance logic based on values)
+                        locals()[field_name] = True if value is None or value == 'دارد' else False
+                
+                # Handle advanced fields if in the main attributes
+                if title in advanced_field_mapping:
+                    field_name = advanced_field_mapping[title]
+                    locals()[field_name] = value
 
                 # Extract key for boolean/enum attributes
                 key = None
@@ -269,11 +305,78 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
                 attributes.append(attr_dict)
                 processed_titles.add(title)
 
+        # Look for the modal dialog content
+        modal_dialog = soup.select_one("div.modal-dialog__content, div[class*='kt-modal-dialog'] div[class*='content']")
+        if modal_dialog:
+            logging.debug(f"[{token}] Found modal dialog content, extracting details...")
+            
+            # Look for features section
+            feature_sections = modal_dialog.select("div[class*='dialog-section']")
+            for section in feature_sections:
+                section_title = section.select_one("div[class*='section-title'], h3, h4")
+                if section_title and "ویژگی‌ها" in section_title.get_text(strip=True):
+                    feature_items = section.select("div[class*='row-item'], div[class*='unexpandable-row']")
+                    
+                    for item in feature_items:
+                        item_title = item.select_one("div[class*='title'], span[class*='title']")
+                        item_value = item.select_one("div[class*='value'], span[class*='value']")
+                        
+                        if item_title:
+                            feature_title = item_title.get_text(strip=True).strip().rstrip(':').strip()
+                            feature_value = item_value.get_text(strip=True) if item_value else None
+                            
+                            # Map to our advanced fields
+                            if feature_title in advanced_field_mapping:
+                                field_name = advanced_field_mapping[feature_title]
+                                locals()[field_name] = feature_value
+                                
+                                # Add to attributes if not already processed
+                                if feature_title not in processed_titles:
+                                    attr_dict = {"title": feature_title}
+                                    if feature_value:
+                                        attr_dict["value"] = feature_value
+                                    attributes.append(attr_dict)
+                                    processed_titles.add(feature_title)
+                
+                # Amenities section
+                elif section_title and "امکانات" in section_title.get_text(strip=True):
+                    amenity_items = section.select("div.row-item, span.row-item")
+                    
+                    for amenity in amenity_items:
+                        amenity_text = amenity.get_text(strip=True)
+                        
+                        # Check if the amenity contains keywords we're interested in
+                        if "پارکینگ" in amenity_text:
+                            has_parking = True
+                        elif "انباری" in amenity_text:
+                            has_storage = True
+                        elif "بالکن" in amenity_text:
+                            has_balcony = True
+                            
+                        # Add to attributes if not already processed
+                        if amenity_text and amenity_text not in processed_titles:
+                            attributes.append({"title": amenity_text, "available": True})
+                            processed_titles.add(amenity_text)
+
+        # Assign all extracted values to the details dictionary
         details['price'] = price
         details['price_per_meter'] = price_per_meter
         details['area'] = area
+        details['land_area'] = land_area
+        details['property_type'] = property_type
         details['year_built'] = year_built
         details['bedrooms'] = bedrooms
+        details['has_parking'] = has_parking
+        details['has_storage'] = has_storage
+        details['has_balcony'] = has_balcony
+        details['title_deed_type'] = title_deed_type
+        details['building_direction'] = building_direction
+        details['renovation_status'] = renovation_status
+        details['floor_material'] = floor_material
+        details['bathroom_type'] = bathroom_type
+        details['cooling_system'] = cooling_system
+        details['heating_system'] = heating_system
+        details['hot_water_system'] = hot_water_system
         details['attributes'] = attributes
         
         logging.debug(f"[{token}] Parsed area: {area}, year: {year_built}, beds: {bedrooms}, price: {price}")
@@ -301,24 +404,92 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
 
 # --- Transform Function (No change needed) ---
 def transform_for_db(extracted_data: dict) -> dict | None:
-    # ... (Function remains the same as previous version) ...
-     if not extracted_data: return None
-     if not extracted_data.get("external_id") or not extracted_data.get("title") or extracted_data.get("title") == 'N/A':
+    if not extracted_data: return None
+    if not extracted_data.get("external_id") or not extracted_data.get("title") or extracted_data.get("title") == 'N/A':
         logging.error(f"Transform: Missing critical data (ID or Title) for token {extracted_data.get('external_id')}. Skipping DB insert.")
         return None
-     db_data = {
-        "p_external_id": extracted_data.get("external_id"), "p_title": extracted_data.get("title"),
-        "p_description": extracted_data.get("description"), "p_price": extracted_data.get("price"),
-        "p_location": extracted_data.get("location"), "p_attributes": extracted_data.get("attributes", []),
-        "p_image_urls": extracted_data.get("image_urls", []), "p_investment_score": None, "p_market_trend": None,
-        "p_neighborhood_fit_score": None, "p_rent_to_price_ratio": None, "p_highlight_flags": [], "p_similar_properties": []
-     }
-     core_attrs = {'متراژ': extracted_data.get('area'), 'ساخت': extracted_data.get('year_built'), 'اتاق': extracted_data.get('bedrooms'), 'قیمت هر متر': extracted_data.get('price_per_meter')}
-     existing_attr_titles = {a['title'] for a in db_data['p_attributes']}
-     for title, value in core_attrs.items():
-         if value is not None and title not in existing_attr_titles: db_data['p_attributes'].append({"title": title, "value": str(value)})
-     if db_data["p_price"] is not None:
-         try: db_data["p_price"] = int(float(db_data["p_price"]))
-         except (ValueError, TypeError): db_data["p_price"] = None
-     logging.debug(f"[{db_data['p_external_id']}] Transformed data for DB.")
-     return db_data
+        
+    db_data = {
+        "p_external_id": extracted_data.get("external_id"), 
+        "p_title": extracted_data.get("title"),
+        "p_description": extracted_data.get("description"), 
+        "p_price": extracted_data.get("price"),
+        "p_location": extracted_data.get("location"), 
+        "p_attributes": extracted_data.get("attributes", []),
+        "p_image_urls": extracted_data.get("image_urls", []), 
+        "p_investment_score": None, 
+        "p_market_trend": None,
+        "p_neighborhood_fit_score": None, 
+        "p_rent_to_price_ratio": None, 
+        "p_highlight_flags": [], 
+        "p_similar_properties": [],
+        
+        # New fields from the enhancement
+        "p_area": extracted_data.get("area"),
+        "p_price_per_meter": extracted_data.get("price_per_meter"),
+        "p_year_built": extracted_data.get("year_built"),
+        "p_bedrooms": extracted_data.get("bedrooms"),
+        "p_land_area": extracted_data.get("land_area"),
+        "p_property_type": extracted_data.get("property_type"),
+        "p_has_parking": extracted_data.get("has_parking", False),
+        "p_has_storage": extracted_data.get("has_storage", False),
+        "p_has_balcony": extracted_data.get("has_balcony", False),
+        "p_title_deed_type": extracted_data.get("title_deed_type"),
+        "p_building_direction": extracted_data.get("building_direction"),
+        "p_renovation_status": extracted_data.get("renovation_status"),
+        "p_floor_material": extracted_data.get("floor_material"),
+        "p_bathroom_type": extracted_data.get("bathroom_type"),
+        "p_cooling_system": extracted_data.get("cooling_system"),
+        "p_heating_system": extracted_data.get("heating_system"),
+        "p_hot_water_system": extracted_data.get("hot_water_system")
+    }
+    
+    # Add core attributes to the attributes array if they're not already there
+    core_attrs = {
+        'متراژ': extracted_data.get('area'), 
+        'متراژ زمین': extracted_data.get('land_area'),
+        'نوع ملک': extracted_data.get('property_type'),
+        'ساخت': extracted_data.get('year_built'), 
+        'اتاق': extracted_data.get('bedrooms'), 
+        'قیمت کل': extracted_data.get('price'),
+        'قیمت هر متر': extracted_data.get('price_per_meter'),
+        'پارکینگ': 'دارد' if extracted_data.get('has_parking') else 'ندارد',
+        'انباری': 'دارد' if extracted_data.get('has_storage') else 'ندارد',
+        'بالکن': 'دارد' if extracted_data.get('has_balcony') else 'ندارد',
+        'سند': extracted_data.get('title_deed_type'),
+        'جهت ساختمان': extracted_data.get('building_direction'),
+        'وضعیت واحد': extracted_data.get('renovation_status'),
+        'جنس کف': extracted_data.get('floor_material'),
+        'سرویس بهداشتی': extracted_data.get('bathroom_type'),
+        'سرمایش': extracted_data.get('cooling_system'),
+        'گرمایش': extracted_data.get('heating_system'),
+        'تأمین‌کننده آب گرم': extracted_data.get('hot_water_system')
+    }
+    
+    existing_attr_titles = {a['title'] for a in db_data['p_attributes']}
+    
+    for title, value in core_attrs.items():
+        if value is not None and title not in existing_attr_titles:
+            db_data['p_attributes'].append({"title": title, "value": str(value)})
+    
+    # Convert price to integer
+    if db_data["p_price"] is not None:
+        try: 
+            db_data["p_price"] = int(float(db_data["p_price"]))
+        except (ValueError, TypeError): 
+            db_data["p_price"] = None
+    
+    # Convert numeric fields to appropriate types
+    for field in ['p_area', 'p_land_area', 'p_price_per_meter', 'p_year_built', 'p_bedrooms']:
+        if db_data[field] is not None:
+            try:
+                db_data[field] = int(float(db_data[field]))
+            except (ValueError, TypeError):
+                db_data[field] = None
+    
+    # Ensure boolean fields are actual booleans
+    for field in ['p_has_parking', 'p_has_storage', 'p_has_balcony']:
+        db_data[field] = bool(db_data[field])
+    
+    logging.debug(f"[{db_data['p_external_id']}] Transformed data for DB with {len(db_data['p_attributes'])} attributes.")
+    return db_data
