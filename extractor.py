@@ -13,12 +13,18 @@ persian_num_map = str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789')
 arabic_num_map = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
 def parse_persian_number(s):
-    # ... (function remains the same) ...
     if not s or not isinstance(s, str): return None
     try:
+        # First, remove common unit words in Persian
+        s = s.replace('متر', '').replace('تومان', '').replace('مترمربع', '')
+        
+        # Then translate Persian/Arabic digits to Latin
         cleaned_s = s.translate(persian_num_map).translate(arabic_num_map)
+        
+        # Remove commas and other non-numeric characters
         cleaned_s = cleaned_s.replace(',', '').strip()
         cleaned_s = re.sub(r'[^\d.-]+', '', cleaned_s)
+        
         if not cleaned_s or cleaned_s == '-': return None
         num = float(cleaned_s)
         return int(num) if num == int(num) else num
@@ -261,24 +267,49 @@ def extract_property_details(html_content: str, token: str) -> dict | None:
 
             if title and title not in processed_titles:
                 logging.debug(f"[{token}] Processing row: Title='{title}', Value='{value}'")
-                parsed_num = parse_persian_number(value.replace(' تومان', '')) if value else None
-
-                # Map known fields based on our mappings
-                if title in field_mapping:
-                    field_name = field_mapping[title]
-                    
-                    # Handle numeric fields
-                    if field_name in ['area', 'land_area', 'year_built', 'bedrooms', 'price', 'price_per_meter']:
-                        locals()[field_name] = parsed_num
-                    # Handle boolean fields
-                    elif field_name in ['has_parking', 'has_storage', 'has_balcony']:
-                        # Set to True if exists in any form (could enhance logic based on values)
-                        locals()[field_name] = True if value is None or value == 'دارد' else False
                 
-                # Handle advanced fields if in the main attributes
-                if title in advanced_field_mapping:
-                    field_name = advanced_field_mapping[title]
-                    locals()[field_name] = value
+                # For price and price_per_meter, need special handling to strip 'تومان'
+                parsed_num = parse_persian_number(value) if value else None
+
+                # Direct field assignments
+                if title == 'متراژ':
+                    area = parsed_num
+                elif title == 'متراژ زمین':
+                    land_area = parsed_num
+                elif title == 'ساخت':
+                    year_built = parsed_num
+                elif title == 'اتاق':
+                    bedrooms = parsed_num
+                elif title == 'قیمت کل':
+                    price = parsed_num
+                elif title == 'قیمت هر متر':
+                    price_per_meter = parsed_num
+                elif title == 'نوع ملک':
+                    property_type = value
+                # Handle boolean fields
+                elif title == 'پارکینگ':
+                    has_parking = False if value == 'ندارد' else True
+                elif title == 'انباری':
+                    has_storage = False if value == 'ندارد' else True
+                elif title == 'بالکن':
+                    has_balcony = False if value == 'ندارد' else True
+                # Advanced fields
+                elif title == 'سند':
+                    title_deed_type = value
+                elif title == 'جهت ساختمان':
+                    building_direction = value
+                elif title == 'وضعیت واحد':
+                    renovation_status = value
+                elif title == 'جنس کف':
+                    floor_material = value
+                elif title == 'سرویس بهداشتی':
+                    bathroom_type = value
+                elif title == 'سرمایش':
+                    cooling_system = value
+                elif title == 'گرمایش':
+                    heating_system = value
+                elif title == 'تأمین‌کننده آب گرم':
+                    hot_water_system = value
 
                 # Extract key for boolean/enum attributes
                 key = None
@@ -408,12 +439,12 @@ def transform_for_db(extracted_data: dict) -> dict | None:
     if not extracted_data.get("external_id") or not extracted_data.get("title") or extracted_data.get("title") == 'N/A':
         logging.error(f"Transform: Missing critical data (ID or Title) for token {extracted_data.get('external_id')}. Skipping DB insert.")
         return None
-        
+    
+    # Start with the basic structure
     db_data = {
         "p_external_id": extracted_data.get("external_id"), 
         "p_title": extracted_data.get("title"),
-        "p_description": extracted_data.get("description"), 
-        "p_price": extracted_data.get("price"),
+        "p_description": extracted_data.get("description"),
         "p_location": extracted_data.get("location"), 
         "p_attributes": extracted_data.get("attributes", []),
         "p_image_urls": extracted_data.get("image_urls", []), 
@@ -422,29 +453,36 @@ def transform_for_db(extracted_data: dict) -> dict | None:
         "p_neighborhood_fit_score": None, 
         "p_rent_to_price_ratio": None, 
         "p_highlight_flags": [], 
-        "p_similar_properties": [],
-        
-        # New fields from the enhancement
-        "p_area": extracted_data.get("area"),
-        "p_price_per_meter": extracted_data.get("price_per_meter"),
-        "p_year_built": extracted_data.get("year_built"),
-        "p_bedrooms": extracted_data.get("bedrooms"),
-        "p_land_area": extracted_data.get("land_area"),
-        "p_property_type": extracted_data.get("property_type"),
-        "p_has_parking": extracted_data.get("has_parking", False),
-        "p_has_storage": extracted_data.get("has_storage", False),
-        "p_has_balcony": extracted_data.get("has_balcony", False),
-        "p_title_deed_type": extracted_data.get("title_deed_type"),
-        "p_building_direction": extracted_data.get("building_direction"),
-        "p_renovation_status": extracted_data.get("renovation_status"),
-        "p_floor_material": extracted_data.get("floor_material"),
-        "p_bathroom_type": extracted_data.get("bathroom_type"),
-        "p_cooling_system": extracted_data.get("cooling_system"),
-        "p_heating_system": extracted_data.get("heating_system"),
-        "p_hot_water_system": extracted_data.get("hot_water_system")
+        "p_similar_properties": []
     }
     
-    # Add core attributes to the attributes array if they're not already there
+    # Handle numeric fields with proper conversion
+    numeric_fields = ['price', 'price_per_meter', 'area', 'land_area', 'year_built', 'bedrooms']
+    for field in numeric_fields:
+        value = extracted_data.get(field)
+        if value is not None:
+            try:
+                db_data[f"p_{field}"] = int(float(value))
+            except (ValueError, TypeError):
+                db_data[f"p_{field}"] = None
+        else:
+            db_data[f"p_{field}"] = None
+    
+    # Handle boolean fields
+    boolean_fields = ['has_parking', 'has_storage', 'has_balcony']
+    for field in boolean_fields:
+        db_data[f"p_{field}"] = bool(extracted_data.get(field, False))
+    
+    # Handle text fields
+    text_fields = [
+        'property_type', 'title_deed_type', 'building_direction', 
+        'renovation_status', 'floor_material', 'bathroom_type',
+        'cooling_system', 'heating_system', 'hot_water_system'
+    ]
+    for field in text_fields:
+        db_data[f"p_{field}"] = extracted_data.get(field)
+    
+    # Add core attributes if they're not already there
     core_attrs = {
         'متراژ': extracted_data.get('area'), 
         'متراژ زمین': extracted_data.get('land_area'),
@@ -452,44 +490,14 @@ def transform_for_db(extracted_data: dict) -> dict | None:
         'ساخت': extracted_data.get('year_built'), 
         'اتاق': extracted_data.get('bedrooms'), 
         'قیمت کل': extracted_data.get('price'),
-        'قیمت هر متر': extracted_data.get('price_per_meter'),
-        'پارکینگ': 'دارد' if extracted_data.get('has_parking') else 'ندارد',
-        'انباری': 'دارد' if extracted_data.get('has_storage') else 'ندارد',
-        'بالکن': 'دارد' if extracted_data.get('has_balcony') else 'ندارد',
-        'سند': extracted_data.get('title_deed_type'),
-        'جهت ساختمان': extracted_data.get('building_direction'),
-        'وضعیت واحد': extracted_data.get('renovation_status'),
-        'جنس کف': extracted_data.get('floor_material'),
-        'سرویس بهداشتی': extracted_data.get('bathroom_type'),
-        'سرمایش': extracted_data.get('cooling_system'),
-        'گرمایش': extracted_data.get('heating_system'),
-        'تأمین‌کننده آب گرم': extracted_data.get('hot_water_system')
+        'قیمت هر متر': extracted_data.get('price_per_meter')
     }
     
+    # Only add non-None attributes that aren't already in the list
     existing_attr_titles = {a['title'] for a in db_data['p_attributes']}
-    
     for title, value in core_attrs.items():
         if value is not None and title not in existing_attr_titles:
             db_data['p_attributes'].append({"title": title, "value": str(value)})
     
-    # Convert price to integer
-    if db_data["p_price"] is not None:
-        try: 
-            db_data["p_price"] = int(float(db_data["p_price"]))
-        except (ValueError, TypeError): 
-            db_data["p_price"] = None
-    
-    # Convert numeric fields to appropriate types
-    for field in ['p_area', 'p_land_area', 'p_price_per_meter', 'p_year_built', 'p_bedrooms']:
-        if db_data[field] is not None:
-            try:
-                db_data[field] = int(float(db_data[field]))
-            except (ValueError, TypeError):
-                db_data[field] = None
-    
-    # Ensure boolean fields are actual booleans
-    for field in ['p_has_parking', 'p_has_storage', 'p_has_balcony']:
-        db_data[field] = bool(db_data[field])
-    
-    logging.debug(f"[{db_data['p_external_id']}] Transformed data for DB with {len(db_data['p_attributes'])} attributes.")
+    logging.debug(f"[{db_data['p_external_id']}] Transformed data for DB.")
     return db_data
