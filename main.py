@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import asyncpg # Ensure this is imported
 import logging
+import random
 import os
 import json
 from urllib.parse import quote
@@ -50,68 +51,90 @@ async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
     except Exception as e: logging.error(f"Unexpected error fetching listings page {page}: {e}", exc_info=True); return None
 
 # --- Crawl and Save Function ---
-async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: str, slug: str):
-    """Crawls a single property, saves data to JSON, and attempts DB save."""
+async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: str, slug: str, api_only: bool = False):
+    """Crawls a single property, saves data to JSON, and attempts DB save with anti-detection measures"""
+    
+    if not token:
+        logging.warning("Skipping widget, missing token.")
+        return
+
     if not db_pool:
         logging.error(f"[{token}] Database pool is not available. Cannot acquire connection.")
         # We'll proceed to crawl but skip DB saving later
 
-    if not token:
-         logging.warning("Skipping widget, missing token.")
-         return
-
     detail_url = DIVAR_DETAIL_URL_FORMAT.format(token=token)
-    logging.info(f"[{token}] Crawling detail page: {detail_url}")
+    logging.info(f"[{token}] {'API-only test for' if api_only else 'Crawling detail page:'} {detail_url}")
 
     db_data = None
     extracted_data = None
 
     try:
-        # IMPROVED: More robust crawler configuration to handle dynamic content
-        run_config = CrawlerRunConfig(
-            cache_mode=CacheMode.BYPASS,  # Always get fresh content
-            page_timeout=90000,  # Longer timeout (90 seconds) for slow loading pages
-            delay_before_return_html=2.0,  # Increased delay to ensure content loads
-            scan_full_page=True,  # Ensures all content is loaded
-            scroll_delay=0.5,  # Slightly longer delay between scrolls
-            remove_overlay_elements=True,  # Remove any popup overlays
-            js_code=[
-                # Force scroll to bottom to trigger lazy loading
-                "window.scrollTo(0, document.body.scrollHeight);",
-                # Wait a bit, then scroll back up to help with revealing content
-                "setTimeout(() => window.scrollTo(0, 0), 500);"
-            ],
-            # Wait for critical elements to load
-            wait_for="css:div.kt-page-title, h1[class*='kt-page-title__title'], div.kt-carousel__cell",
-            magic=True  # Enable auto-handling of popups, etc.
-        )
-        
-        # Execute the crawl with improved configuration
-        result = await crawler.arun(url=detail_url, config=run_config)
-
-        if result.success and result.html:
-            logging.info(f"[{token}] Crawl successful. Parsing RAW HTML (length: {len(result.html)})...")
-            extracted_data = extract_property_details(result.html, token)  # Pass result.html
+        if api_only:
+            # API-only testing mode - skip browser crawling
+            logging.info(f"[{token}] Running API-only test mode...")
+            extracted_data = await extract_property_details("", token, extract_api_only=True)
+            
             if extracted_data:
-                db_data = transform_for_db(extracted_data)  # Try transforming even if DB is down
-                if not db_data:
-                    logging.warning(f"[{token}] Failed to transform data for DB (missing title/id?).")
+                logging.info(f"[{token}] API-only test successful")
+                # Print key extracted data for verification
+                print(f"\n=== API Test Results for {token} ===")
+                print(f"Area: {extracted_data.get('area')}")
+                print(f"Bedrooms: {extracted_data.get('bedrooms')}")
+                print(f"Price: {extracted_data.get('price')}")
+                print(f"Has Parking: {extracted_data.get('has_parking')}")
+                print(f"Has Storage: {extracted_data.get('has_storage')}")
+                print(f"Has Balcony: {extracted_data.get('has_balcony')}")
+                print(f"Floor Material: {extracted_data.get('floor_material')}")
+                print("=" * 50)
             else:
-                logging.warning(f"[{token}] Failed to extract details from HTML for URL {detail_url}.")
+                logging.error(f"[{token}] API-only test failed - no data extracted")
                 
-                # IMPROVED: Save problematic HTML for debugging
-                if not extracted_data:
-                    debug_filename = Path(JSON_OUTPUT_DIR) / f"{token}_failed.html"
-                    try:
-                        await asyncio.to_thread(lambda: Path(debug_filename).write_text(result.html, encoding='utf-8'))
-                        logging.info(f"[{token}] Saved problematic HTML to {debug_filename} for debugging")
-                    except Exception as err:
-                        logging.error(f"[{token}] Failed to save debug HTML: {err}")
-                        
-        elif result.success:
-             logging.warning(f"[{token}] Crawl successful but no HTML content found for {detail_url}. Status: {result.status_code}")
         else:
-            logging.error(f"[{token}] Failed to crawl detail page {detail_url}: {result.error_message} (Status: {result.status_code})")
+            # Full crawl with anti-detection measures
+            run_config = CrawlerRunConfig(
+                cache_mode=CacheMode.BYPASS,
+                page_timeout=random.randint(60000, 90000),
+                delay_before_return_html=random.uniform(2.0, 4.0),
+                scan_full_page=True,
+                scroll_delay=random.uniform(0.3, 0.8),
+                remove_overlay_elements=True,
+                simulate_user=True,
+                js_code=[
+                    f"await new Promise(resolve => setTimeout(resolve, {random.randint(1000, 3000)}));",
+                    "window.scrollTo(0, document.body.scrollHeight);",
+                    f"await new Promise(resolve => setTimeout(resolve, {random.randint(500, 1500)}));",
+                    "window.scrollTo(0, 0);"
+                ],
+                wait_for="css:div.kt-page-title, h1[class*='kt-page-title__title'], div.kt-carousel__cell",
+                magic=True
+            )
+            
+            result = await crawler.arun(url=detail_url, config=run_config)
+
+            if result.success and result.html:
+                logging.info(f"[{token}] Crawl successful. Parsing RAW HTML (length: {len(result.html)})...")
+                extracted_data = await extract_property_details(result.html, token)
+                
+                if extracted_data:
+                    db_data = transform_for_db(extracted_data)
+                    if not db_data:
+                        logging.warning(f"[{token}] Failed to transform data for DB (missing title/id?).")
+                else:
+                    logging.warning(f"[{token}] Failed to extract details from HTML for URL {detail_url}.")
+                    
+                    # IMPROVED: Save problematic HTML for debugging
+                    if not extracted_data:
+                        debug_filename = Path(JSON_OUTPUT_DIR) / f"{token}_failed.html"
+                        try:
+                            await asyncio.to_thread(lambda: Path(debug_filename).write_text(result.html, encoding='utf-8'))
+                            logging.info(f"[{token}] Saved problematic HTML to {debug_filename} for debugging")
+                        except Exception as err:
+                            logging.error(f"[{token}] Failed to save debug HTML: {err}")
+                            
+            elif result.success:
+                logging.warning(f"[{token}] Crawl successful but no HTML content found for {detail_url}. Status: {result.status_code}")
+            else:
+                logging.error(f"[{token}] Failed to crawl detail page {detail_url}: {result.error_message} (Status: {result.status_code})")
 
     except Exception as e:
         logging.error(f"[{token}] Unexpected error during crawl/parse for {detail_url}: {e}", exc_info=True)
@@ -135,15 +158,92 @@ async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: 
             logging.error(f"[{token}] Failed to acquire DB connection or save: {db_e}", exc_info=True)
     elif db_data and not db_pool:
         logging.error(f"[{token}] Database pool is not available. Data saved to JSON only.")
-    # Logging for other cases handled within transform_for_db or the extraction process
+    elif not api_only:
+        # Only log this if we're not in API test mode
+        logging.info(f"[{token}] {'No data to save to DB' if not db_data else 'Data processing completed'}")
+        
+    # Add a small delay between requests to avoid rate limiting
+    if not api_only:
+        delay = random.uniform(1.0, 3.0)
+        logging.debug(f"[{token}] Waiting {delay:.2f} seconds before next request...")
+        await asyncio.sleep(delay)
 
 # --- Main Orchestration ---
 async def main():
     """Main orchestration function."""
     db_pool_instance = await init_db_pool() # Initialize the pool
+    # Simple proxy configuration
+    PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
+
+    # Test mode configuration
+    TEST_MODE = False
+    TEST_TOKEN = "AaA0POtn"
+    API_ONLY_TEST = False
+    
+    if TEST_MODE:
+        logging.info("=== RUNNING IN TEST MODE ===")
+        
+        if API_ONLY_TEST:
+            # API calls also use proxy via environment
+            os.environ['HTTP_PROXY'] = PROXY_URL
+            os.environ['HTTPS_PROXY'] = PROXY_URL
+            await crawl_and_save_property(None, db_pool_instance, TEST_TOKEN, "test-slug", api_only=True)
+        else:
+            browser_config = BrowserConfig(
+                browser_type="chromium",
+                headless=False,
+                proxy=PROXY_URL,  # Add your proxy here
+                viewport_width=random.randint(1200, 1400),
+                viewport_height=random.randint(800, 1000),
+                user_agent="random",
+                verbose=True,
+            )
+            
+            async with AsyncWebCrawler(config=browser_config) as crawler:
+                await crawl_and_save_property(crawler, db_pool_instance, TEST_TOKEN, "test-slug", api_only=False)
+        
+        logging.info("=== TEST MODE COMPLETED ===")
+        return
 
     if not db_pool_instance:
         logging.warning("Database pool initialization failed. Proceeding with JSON saving only.") # Changed to warning
+
+    # Anti-detection measures
+    # Regular crawling with proxy
+    browser_config = BrowserConfig(
+        browser_type="chromium",
+        headless=True,
+        proxy=PROXY_URL,  # Add your proxy here
+        viewport_width=random.randint(1200, 1400),
+        viewport_height=random.randint(800, 1000),
+        user_agent="random",
+        verbose=False,
+    )
+    
+    # For API calls, also set environment variables
+    os.environ['HTTP_PROXY'] = PROXY_URL
+    os.environ['HTTPS_PROXY'] = PROXY_URL
+
+    # Anti-detection crawler run config
+    run_config = CrawlerRunConfig(
+        cache_mode=CacheMode.BYPASS,
+        page_timeout=random.randint(25000, 35000),  # Random timeout
+        delay_before_return_html=random.uniform(2.0, 4.0),  # Random delay
+        mean_delay=random.uniform(5.0, 10.0),  # Random delay between pages
+        max_range=random.uniform(2.0, 5.0),     # Random variation
+        scan_full_page=True,
+        scroll_delay=random.uniform(0.3, 0.8),  # Random scroll delay
+        remove_overlay_elements=True,
+        simulate_user=True,  # Simulate human behavior
+        js_code=[
+            f"await new Promise(resolve => setTimeout(resolve, {random.randint(1000, 3000)}));",  # Random wait
+            "window.scrollTo(0, document.body.scrollHeight);",
+            f"await new Promise(resolve => setTimeout(resolve, {random.randint(500, 1500)}));",  # Another random wait
+            "window.scrollTo(0, 0);"
+        ],
+        wait_for="css:div.kt-page-title, h1[class*='kt-page-title__title'], div.kt-carousel__cell",
+        magic=True
+    )
 
     next_page_cursor = None
     crawled_tokens = set()

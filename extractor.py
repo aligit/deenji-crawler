@@ -3,30 +3,66 @@
 import json
 import re
 import logging
+import asyncio
+import random
+import aiohttp
 from bs4 import BeautifulSoup
 from pathlib import Path
+from datetime import datetime
+from typing import Optional
 
 JSON_OUTPUT_DIR = "output_json"
 Path(JSON_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
-# Persian/Arabic number translation maps
 persian_num_map = str.maketrans('۰۱۲۳۴۵۶۷۸۹', '0123456789')
 arabic_num_map = str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789')
 
+# Rate limiting for API calls
+class APIRateLimiter:
+    def __init__(self, min_delay=1.0, max_delay=3.0):
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.last_call_time = 0
+        
+    async def wait(self):
+        """Wait before making the next API call"""
+        current_time = datetime.now().timestamp()
+        time_since_last_call = current_time - self.last_call_time
+        
+        # Calculate delay based on randomization
+        delay = random.uniform(self.min_delay, self.max_delay)
+        
+        if time_since_last_call < delay:
+            wait_time = delay - time_since_last_call
+            logging.debug(f"Rate limiting: waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+        
+        self.last_call_time = datetime.now().timestamp()
+
+# Global rate limiter instance
+api_rate_limiter = APIRateLimiter(min_delay=2.0, max_delay=5.0)
+
+# User agents for rotation
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36'
+]
+
 def parse_persian_number(s):
-    """Parse Persian/Arabic numbers to standard digits and convert to numeric types."""
     if not s or not isinstance(s, str): 
         return None
     try:
-        # First, remove common unit words in Persian
-        s = s.replace('متر', '').replace('تومان', '').replace('مترمربع', '')
+        # Remove common unit words in Persian
+        s = s.replace('متر', '').replace('تومان', '').replace('مترمربع', '').replace('٬', '').replace(',', '')
         
-        # Then translate Persian/Arabic digits to Latin
+        # Translate Persian/Arabic digits to Latin
         cleaned_s = s.translate(persian_num_map).translate(arabic_num_map)
         
         # Remove commas and other non-numeric characters
-        cleaned_s = cleaned_s.replace(',', '').strip()
-        cleaned_s = re.sub(r'[^\d.-]+', '', cleaned_s)
+        cleaned_s = re.sub(r'[^\d.-]+', '', cleaned_s.strip())
         
         if not cleaned_s or cleaned_s == '-': 
             return None
@@ -36,514 +72,334 @@ def parse_persian_number(s):
         logging.debug(f"Could not parse number string '{s}' to number: {e}")
         return None
 
-def extract_property_details(html_content: str, token: str) -> dict | None:
-    """
-    Extract detailed information from a Divar property listing.
+async def fetch_divar_api_data(token: str) -> dict:
+    """Fetch property details from Divar API with rate limiting and user agent rotation"""
+    url = f"https://api.divar.ir/v8/posts-v2/web/{token}"
+    
+    # Wait for rate limiter
+    await api_rate_limiter.wait()
+    
+    # Random user agent
+    headers = {
+        'User-Agent': random.choice(USER_AGENTS),
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Referer': 'https://divar.ir/',
+        'Origin': 'https://divar.ir',
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            logging.info(f"[{token}] Fetching from API...")
+            async with session.get(url, headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logging.info(f"[{token}] API data fetched successfully")
+                    return data
+                elif response.status == 429:
+                    logging.warning(f"[{token}] Rate limited by API (429). Waiting longer...")
+                    await asyncio.sleep(10)  # Wait longer if rate limited
+                    return {}
+                else:
+                    logging.error(f"[{token}] API call failed with status {response.status}")
+                    return {}
+    except asyncio.TimeoutError:
+        logging.error(f"[{token}] API request timed out")
+        return {}
+    except Exception as e:
+        logging.error(f"[{token}] Error fetching API data: {e}")
+        return {}
+
+def extract_attributes_from_api(api_data: dict) -> dict:
+    """Extract attributes from API response"""
+    attributes = []
+    
+    # Initialize all fields with defaults
+    area = bedrooms = price = price_per_meter = year_built = None
+    land_area = property_type = None
+    has_parking = has_storage = has_balcony = False
+    title_deed_type = building_direction = renovation_status = None
+    floor_material = bathroom_type = cooling_system = None
+    heating_system = hot_water_system = None
+    floor_info = None
+    
+    # Process each section
+    for section in api_data.get('sections', []):
+        for widget in section.get('widgets', []):
+            widget_type = widget.get('widget_type')
+            data = widget.get('data', {})
+            
+            if widget_type == 'GROUP_INFO_ROW':
+                # Process basic attributes like area, year, bedrooms
+                for item in data.get('items', []):
+                    title = item.get('title', '')
+                    value = item.get('value', '')
+                    
+                    # Store in attributes list
+                    attributes.append({
+                        'title': title,
+                        'value': value
+                    })
+                    
+                    # Map to specific fields
+                    if title == 'متراژ':
+                        area = parse_persian_number(value)
+                    elif title == 'متراژ زمین':
+                        land_area = parse_persian_number(value)
+                    elif title == 'ساخت':
+                        year_built = parse_persian_number(value)
+                    elif title == 'اتاق':
+                        bedrooms = parse_persian_number(value)
+                    elif title == 'نوع ملک':
+                        property_type = value
+                        
+            elif widget_type == 'UNEXPANDABLE_ROW':
+                # Process single row attributes like price, floor
+                title = data.get('title', '')
+                value = data.get('value', '')
+                
+                # Store in attributes list
+                attributes.append({
+                    'title': title,
+                    'value': value
+                })
+                
+                # Map to specific fields
+                if title == 'قیمت کل':
+                    price = parse_persian_number(value)
+                elif title == 'قیمت هر متر':
+                    price_per_meter = parse_persian_number(value)
+                elif title == 'طبقه':
+                    floor_info = value
+                    
+            elif widget_type == 'GROUP_FEATURE_ROW':
+                # Process features like parking, storage, balcony
+                items = data.get('items', [])
+                for item in items:
+                    title = item.get('title', '').strip()
+                    available = item.get('available', False)
+                    icon = item.get('icon', {})
+                    
+                    # Store in attributes list
+                    attributes.append({
+                        'title': title,
+                        'available': available,
+                        'key': icon.get('icon_name', '')
+                    })
+                    
+                    # Map to boolean fields
+                    if 'پارکینگ' in title:
+                        has_parking = available
+                    elif 'انباری' in title:
+                        has_storage = available
+                    elif 'بالکن' in title:
+                        has_balcony = available
+                
+                # Process modal page data (advanced attributes)
+                action = data.get('action', {})
+                if action.get('type') == 'LOAD_MODAL_PAGE':
+                    modal_data = action.get('payload', {}).get('modal_page', {})
+                    for widget in modal_data.get('widget_list', []):
+                        if widget.get('widget_type') == 'UNEXPANDABLE_ROW':
+                            modal_item = widget.get('data', {})
+                            title = modal_item.get('title', '')
+                            value = modal_item.get('value', '')
+                            
+                            # Add to attributes
+                            attributes.append({
+                                'title': title,
+                                'value': value
+                            })
+                            
+                            # Map advanced fields
+                            if title == 'سند':
+                                title_deed_type = value
+                            elif title == 'جهت ساختمان':
+                                building_direction = value
+                            elif title == 'وضعیت واحد':
+                                renovation_status = value
+                        
+                        elif widget.get('widget_type') == 'FEATURE_ROW':
+                            feature_data = widget.get('data', {})
+                            title = feature_data.get('title', '').strip()
+                            
+                            # Add to attributes
+                            attributes.append({
+                                'title': title,
+                                'available': True,  # Features in modal are available
+                                'key': feature_data.get('icon', {}).get('icon_name', '')
+                            })
+                            
+                            # Map feature fields
+                            if 'جنس کف' in title:
+                                floor_material = title.replace('جنس کف ', '')
+                            elif 'سرویس بهداشتی' in title:
+                                bathroom_type = title.replace('سرویس بهداشتی ', '')
+                            elif 'سرمایش' in title:
+                                cooling_system = title.replace('سرمایش ', '')
+                            elif 'گرمایش' in title:
+                                heating_system = title.replace('گرمایش ', '')
+                            elif 'تأمین‌کننده آب گرم' in title:
+                                hot_water_system = title.replace('تأمین‌کننده آب گرم ', '')
+    
+    return {
+        'attributes': attributes,
+        'area': area,
+        'land_area': land_area,
+        'property_type': property_type,
+        'bedrooms': bedrooms,
+        'price': price,
+        'price_per_meter': price_per_meter,
+        'year_built': year_built,
+        'has_parking': has_parking,
+        'has_storage': has_storage,
+        'has_balcony': has_balcony,
+        'title_deed_type': title_deed_type,
+        'building_direction': building_direction,
+        'renovation_status': renovation_status,
+        'floor_material': floor_material,
+        'bathroom_type': bathroom_type,
+        'cooling_system': cooling_system,
+        'heating_system': heating_system,
+        'hot_water_system': hot_water_system,
+        'floor_info': floor_info
+    }
+
+async def extract_property_details(html_content: str, token: str, extract_api_only: bool = False) -> dict | None:
+    """Extract property details using API + HTML for best results
     
     Args:
-        html_content: The HTML content of the property page
-        token: The property identifier
-        
-    Returns:
-        Dictionary containing property details or None if extraction failed
+        html_content: The HTML content from the page
+        token: The Divar ad token
+        extract_api_only: If True, only extracts basic info from API (for testing)
     """
-    if not html_content:
+    
+    if not html_content and not extract_api_only:
         logging.warning(f"[{token}] HTML content is empty.")
         return None
 
-    soup = BeautifulSoup(html_content, 'lxml')
     details = {"external_id": token}
-    logging.debug(f"[{token}] Starting HTML parsing. Content length: {len(html_content)}")
-
+    
     try:
-        # --- IMPROVED Title Extraction Logic ---
-        title = None
-        title_selectors = [
-            "h1.kt-page-title__title.kt-page-title__title--responsive-sized",
-            "h1[class*='kt-page-title__title']",
-            "div.kt-page-title h1",
-            "div.kt-page-title__texts h1",
-            "div[class*='kt-page-title'] h1",
-            "h1"  # Last resort: any h1
-        ]
-        
-        for selector in title_selectors:
-            title_tag = soup.select_one(selector)
-            if title_tag:
-                title = title_tag.get_text(strip=True)
-                logging.debug(f"[{token}] Found title using selector: {selector}")
-                break
-                
-        # If still no title, try additional fallbacks
-        if not title:
-            # Try main content areas
-            main_content_areas = ['main', 'article', "div[class*='kt-col-5']"]
-            for area_selector in main_content_areas:
-                area = soup.select_one(area_selector)
-                h1 = area.find('h1') if area else None
-                if h1:
-                    title_tag = h1
-                    title = title_tag.get_text(strip=True)
-                    logging.debug(f"[{token}] Found title via fallback {area_selector} > h1")
-                    break
-                    
-            # Try page title as last resort
-            if not title:
-                title_tag = soup.find('title')
+        # If extract_api_only is True, skip HTML processing
+        if not extract_api_only:
+            soup = BeautifulSoup(html_content, 'lxml')
+            
+            # Extract title (the good stuff from HTML)
+            title = None
+            title_selectors = [
+                "h1.kt-page-title__title.kt-page-title__title--responsive-sized",
+                "h1[class*='kt-page-title__title']",
+                "div.kt-page-title h1",
+                "h1"
+            ]
+            
+            for selector in title_selectors:
+                title_tag = soup.select_one(selector)
                 if title_tag:
                     title = title_tag.get_text(strip=True)
-                    title = title.split('|')[0].split('-')[0].strip()
-                    logging.debug(f"[{token}] Found title from page <title> tag")
-        
-        # Clean up title if found
-        if title:
-            # Remove any extra whitespace or line breaks
-            title = ' '.join(title.split())
-            details['title'] = title
-        else:
-            details['title'] = 'N/A'
-            
-        if details['title'] == 'N/A':
-            logging.warning(f"[{token}] Title extraction FAILED.")
-        else:
-            logging.info(f"[{token}] Extracted Title: '{details['title'][:50]}...'")
-
-        # --- IMPROVED Description Extraction Logic ---
-        description = None
-        
-        # Try a broader range of description selectors
-        description_selectors = [
-            "div[class*='kt-description-row'] > div > p[class*='kt-description-row__text']",
-            "p.kt-description-row__text--primary",
-            "div.kt-base-row.kt-base-row--large.kt-description-row div.kt-base-row__start p",
-            "div.kt-base-row.kt-base-row--large.kt-description-row p",
-            "div[class*='description'] p",
-            "div[class*='kt-description'] p",
-            "div[class*='description-row'] p"
-        ]
-        
-        for selector in description_selectors:
-            desc_elements = soup.select(selector)
-            if desc_elements:
-                # Combine all matching elements
-                description = '\n'.join([elem.get_text(strip=True) for elem in desc_elements if elem.get_text(strip=True)])
-                if description:
-                    logging.debug(f"[{token}] Found description using selector: {selector}")
+                    logging.debug(f"[{token}] Found title using selector: {selector}")
                     break
-        
-        # If still no description, try finding by heading text
-        if not description:
-            # Look for heading with "توضیحات" (description in Persian)
-            description_headings = soup.find_all(['h2', 'h3', 'div', 'span'], 
-                                               string=lambda s: s and 'توضیحات' in s)
             
-            for heading in description_headings:
-                # Try to find description in siblings or parent's children
-                desc_container = None
-                
-                # Check next siblings
-                desc_container = heading.find_next_sibling(['div', 'p'])
-                
-                # If not found, check parent's children after this element
-                if not desc_container and heading.parent:
-                    siblings = list(heading.parent.children)
-                    try:
-                        idx = siblings.index(heading)
-                        if idx < len(siblings) - 1:
-                            desc_container = siblings[idx + 1]
-                    except ValueError:
-                        pass
-                
-                # If found a container, extract text
-                if desc_container:
-                    desc_text = desc_container.get_text(strip=True)
-                    if len(desc_text) > 30:  # Minimum length for description
-                        description = desc_text
-                        logging.debug(f"[{token}] Found description after heading: {heading.get_text(strip=True)}")
+            details['title'] = title or 'N/A'
+            
+            # Extract description
+            description = None
+            description_selectors = [
+                "div[class*='kt-description-row'] > div > p[class*='kt-description-row__text']",
+                "p.kt-description-row__text--primary",
+                "div.kt-base-row.kt-base-row--large.kt-description-row p"
+            ]
+            
+            for selector in description_selectors:
+                desc_elements = soup.select(selector)
+                if desc_elements:
+                    description = '\n'.join([elem.get_text(strip=True) for elem in desc_elements if elem.get_text(strip=True)])
+                    if description:
+                        logging.debug(f"[{token}] Found description using selector: {selector}")
                         break
-        
-        # Last resort: Find any substantial paragraph in the main content
-        if not description:
-            # First, identify the main content column
-            main_columns = soup.select("div[class*='kt-col-5'], div[class*='kt-col-6'], article, main")
             
-            for main_col in main_columns:
-                # Find all paragraphs with substantial text
-                paragraphs = main_col.find_all('p')
-                substantial_paragraphs = [p for p in paragraphs 
-                                         if len(p.get_text(strip=True)) > 80 
-                                         and not p.find_parent(['header', 'footer', 'nav'])]
-                
-                if substantial_paragraphs:
-                    # Use the longest paragraph as the description
-                    substantial_paragraphs.sort(key=lambda p: len(p.get_text(strip=True)), reverse=True)
-                    description = substantial_paragraphs[0].get_text(strip=True)
-                    logging.debug(f"[{token}] Found description using longest paragraph in main content")
-                    break
-        
-        # Clean up and store description
-        if description:
-            # Normalize whitespace
-            description = ' '.join(description.split())
-            details['description'] = description
+            details['description'] = description or ''
+            
+            # Extract images
+            image_urls = []
+            picture_tags = soup.select('div[class*=kt-carousel] picture img[src*="divarcdn"]')
+            for img in picture_tags:
+                src = img.get('src')
+                srcset = img.get('srcset')
+                if srcset:
+                    sources = [s.strip().split(' ')[0] for s in srcset.split(',')]
+                    src = sources[-1] if sources else src
+                if src and src not in image_urls:
+                    image_urls.append(src)
+            details['image_urls'] = image_urls
+            logging.debug(f"[{token}] Found {len(image_urls)} images.")
+            
+            # Extract location from script tags
+            location = None
+            script_tags_ld = soup.find_all('script', type='application/ld+json')
+            for script in script_tags_ld:
+                try:
+                    data = json.loads(script.string)
+                    if isinstance(data, dict) and data.get('@type') == 'Product':
+                        location_info = data.get('offers', {}).get('price', '')
+                        if location_info:
+                            location = location_info
+                            break
+                except:
+                    pass
+            details['location'] = location
         else:
-            details['description'] = ''
-            
-        if not details['description']:
-            logging.warning(f"[{token}] Description extraction FAILED.")
+            # For API-only extraction, set minimal values
+            details.update({
+                'title': 'API Test Mode',
+                'description': '',
+                'image_urls': [],
+                'location': None
+            })
+        
+        # Get ALL attributes from the API
+        api_data = await fetch_divar_api_data(token)
+        if api_data:
+            api_attributes = extract_attributes_from_api(api_data)
+            details.update(api_attributes)
+            logging.info(f"[{token}] Successfully extracted attributes from API")
         else:
-            logging.info(f"[{token}] Extracted Description: '{details['description'][:50]}...'")
-
-        # --- Images, Location, Attributes, Prices ---
-        image_urls = []
-        picture_tags = soup.select('div[class*=kt-carousel] picture img[src*="divarcdn"]')
-        for img in picture_tags:
-            src = img.get('src')
-            srcset = img.get('srcset')
-            if srcset:
-                sources = [s.strip().split(' ')[0] for s in srcset.split(',')]
-                src = sources[-1] if sources else src
-            if src and src not in image_urls:
-                image_urls.append(src)
-        details['image_urls'] = image_urls
-        logging.debug(f"[{token}] Found {len(image_urls)} images.")
-
-        # --- Location logic ---
-        location = None
-        script_tags_ld = soup.find_all('script', type='application/ld+json')
-        # Process location from script tags
-        # [Keep your existing code here]
-        details['location'] = location
-        if not location:
-            logging.warning(f"[{token}] Location extraction failed.")
-
-        # --- IMPROVED Attribute Extraction Logic ---
-        attributes = []
-        processed_titles = set()
-        price, price_per_meter, area, year_built, bedrooms = None, None, None, None, None
-        land_area, property_type = None, None  # New fields
-        has_parking, has_storage, has_balcony = False, False, False  # Initialize boolean flags
-        title_deed_type, building_direction, renovation_status = None, None, None
-        floor_material, bathroom_type, cooling_system = None, None, None
-        heating_system, hot_water_system = None, None
+            # Default values if API fails
+            logging.warning(f"[{token}] API failed, using default values")
+            details.update({
+                'attributes': [],
+                'area': None,
+                'land_area': None,
+                'property_type': None,
+                'bedrooms': None,
+                'price': None,
+                'price_per_meter': None,
+                'year_built': None,
+                'has_parking': False,
+                'has_storage': False,
+                'has_balcony': False,
+                'title_deed_type': None,
+                'building_direction': None,
+                'renovation_status': None,
+                'floor_material': None,
+                'bathroom_type': None,
+                'cooling_system': None,
+                'heating_system': None,
+                'hot_water_system': None,
+                'floor_info': None,
+            })
         
-        # Define attribute selectors that cover various Divar UI patterns
-        attribute_selectors = [
-            "div[class*='kt-group-row'] div[class*='kt-group-row-item']",
-            "div[class*='kt-base-row'] div[class*='kt-base-row__start']",
-            "div[class*='unexpandable-row']",
-            "div[class*='expandable-part'] div[class*='kt-group-row-item']",
-            "li[class*='kt-attr-item']",
-            "div[class*='kt-accordion-item']",
-            # Add any additional patterns you observe in Divar's HTML
-        ]
-        
-        # Process each selector type to find attributes
-        for selector in attribute_selectors:
-            attr_items = soup.select(selector)
-            logging.debug(f"[{token}] Found {len(attr_items)} items with selector: {selector}")
-            
-            for item in attr_items:
-                # Multiple approaches to find title elements
-                title_candidates = [
-                    item.find(['span', 'p', 'div'], class_=lambda c: c and ('title' in c.lower() or 'label' in c.lower())),
-                    item.find(['span', 'p', 'div'], class_=lambda c: c and 'kt-group-row-item__title' in c),
-                    item.select_one('span.kt-group-row-item__title, span.title, p.title')
-                ]
-                
-                title_el = next((t for t in title_candidates if t), None)
-                
-                # Multiple approaches to find value elements
-                value_candidates = [
-                    item.find(['span', 'p', 'div'], class_=lambda c: c and ('value' in c.lower() or 'data' in c.lower())),
-                    title_el.find_next_sibling(['span', 'p', 'div']) if title_el else None,
-                    item if 'kt-group-row-item' in item.get('class', []) else None
-                ]
-                
-                value_el = next((v for v in value_candidates if v), None)
-                
-                # Extract title and value text
-                if title_el:
-                    title = title_el.get_text(strip=True).strip().rstrip(':').strip()
-                    
-                    # Extract value text - handle different cases
-                    value_text = ""
-                    if value_el:
-                        if value_el == item and 'kt-group-row-item' in item.get('class', []):
-                            # For group-row-items where the title is inside the value element
-                            full_text = value_el.get_text(strip=True)
-                            if title in full_text:
-                                value_text = full_text.replace(title, '', 1).strip()
-                            else:
-                                value_text = full_text
-                        else:
-                            value_text = value_el.get_text(strip=True)
-                    
-                    # Skip if we've already processed this title or if value is empty
-                    if not title or title in processed_titles or not value_text:
-                        continue
-                    
-                    logging.debug(f"[{token}] Processing attribute: {title} = {value_text}")
-                    processed_titles.add(title)
-                    
-                    # Parse numeric values
-                    parsed_num = parse_persian_number(value_text)
-                    
-                    # --- DIRECT FIELD ASSIGNMENTS ---
-                    # Map common field names
-                    if title == 'متراژ':
-                        area = parsed_num
-                        logging.debug(f"[{token}] Extracted area: {area}")
-                    elif title == 'متراژ زمین':
-                        land_area = parsed_num
-                        logging.debug(f"[{token}] Extracted land area: {land_area}")
-                    elif title == 'ساخت':
-                        year_built = parsed_num
-                        logging.debug(f"[{token}] Extracted year built: {year_built}")
-                    elif title == 'اتاق':
-                        bedrooms = parsed_num
-                        logging.debug(f"[{token}] Extracted bedrooms: {bedrooms}")
-                    elif title == 'قیمت کل':
-                        price = parsed_num
-                        logging.debug(f"[{token}] Extracted price: {price}")
-                    elif title == 'قیمت هر متر':
-                        price_per_meter = parsed_num
-                        logging.debug(f"[{token}] Extracted price per meter: {price_per_meter}")
-                    elif title == 'نوع ملک':
-                        property_type = value_text
-                        logging.debug(f"[{token}] Extracted property type: {property_type}")
-                    # --- BOOLEAN FIELDS HANDLING ---
-                    elif title == 'پارکینگ':
-                        has_parking = False if value_text == 'ندارد' else True
-                        logging.debug(f"[{token}] Extracted parking: {has_parking}")
-                    elif title == 'انباری':
-                        has_storage = False if value_text == 'ندارد' else True
-                        logging.debug(f"[{token}] Extracted storage: {has_storage}")
-                    elif title == 'بالکن':
-                        has_balcony = False if value_text == 'ندارد' else True
-                        logging.debug(f"[{token}] Extracted balcony: {has_balcony}")
-                    # Advanced field types
-                    elif title == 'سند':
-                        title_deed_type = value_text
-                    elif title == 'جهت ساختمان':
-                        building_direction = value_text
-                    elif title == 'وضعیت واحد':
-                        renovation_status = value_text
-                    elif title == 'جنس کف':
-                        floor_material = value_text
-                    elif title == 'سرویس بهداشتی':
-                        bathroom_type = value_text
-                    elif title == 'سرمایش':
-                        cooling_system = value_text
-                    elif title == 'گرمایش':
-                        heating_system = value_text
-                    elif title == 'تأمین‌کننده آب گرم':
-                        hot_water_system = value_text
-                    
-                    # Add to general attributes list
-                    attr_dict = {"title": title, "value": value_text}
-                    
-                    # Add availability info for boolean fields
-                    if 'ندارد' in value_text:
-                        attr_dict["available"] = False
-                    elif 'دارد' in value_text:
-                        attr_dict["available"] = True
-                    
-                    # Extract icon-based key if available
-                    icon_tag = item.find('i', class_=lambda c: c and 'kt-icon-' in c)
-                    if icon_tag and icon_tag.get('class'):
-                        for css_class in icon_tag['class']:
-                            if 'kt-icon-' in css_class:
-                                key_candidate = css_class.split('kt-icon-')[-1].upper().replace('-', '_')
-                                if len(key_candidate) > 2 and not any(c.isdigit() for c in key_candidate):
-                                    attr_dict["key"] = key_candidate
-                                    break
-                    
-                    attributes.append(attr_dict)
-
-        # --- ENHANCED Modal Dialog Extraction ---
-        # Look for the modal dialog content (shown after clicking "Show all details")
-        modal_dialog_selectors = [
-            "div.modal-dialog__content", 
-            "div[class*='kt-modal-dialog'] div[class*='content']",
-            "div[class*='modal-content']",
-            "div[class*='kt-dialog-content']"
-        ]
-        
-        for modal_selector in modal_dialog_selectors:
-            modal_dialog = soup.select_one(modal_selector)
-            if modal_dialog:
-                logging.debug(f"[{token}] Found modal dialog content using selector: {modal_selector}")
-                
-                # Look for features section in modal
-                feature_section_selectors = [
-                    "div[class*='dialog-section']",
-                    "div[class*='kt-accordion']",
-                    "div[class*='feature-section']",
-                    "section[class*='feature']"
-                ]
-                
-                for section_selector in feature_section_selectors:
-                    feature_sections = modal_dialog.select(section_selector)
-                    
-                    for section in feature_sections:
-                        # Find section title element
-                        section_title_el = section.select_one("div[class*='section-title'], h3, h4, div[class*='accordion-title'], div[class*='title']")
-                        
-                        if section_title_el and ("ویژگی‌ها" in section_title_el.get_text(strip=True) or 
-                                               "مشخصات" in section_title_el.get_text(strip=True) or
-                                               "امکانات" in section_title_el.get_text(strip=True)):
-                            
-                            # Find feature items
-                            feature_item_selectors = [
-                                "div[class*='row-item']", 
-                                "div[class*='unexpandable-row']", 
-                                "div[class*='item']",
-                                "div[class*='kt-base-row']",
-                                "div[class*='kt-group-row-item']"
-                            ]
-                            
-                            for item_selector in feature_item_selectors:
-                                feature_items = section.select(item_selector)
-                                
-                                for item in feature_items:
-                                    # Similar to main extraction, extract title and value
-                                    title_el = item.select_one("div[class*='title'], span[class*='title']")
-                                    value_el = item.select_one("div[class*='value'], span[class*='value']")
-                                    
-                                    if title_el:
-                                        title = title_el.get_text(strip=True).strip().rstrip(':').strip()
-                                        value_text = value_el.get_text(strip=True) if value_el else ""
-                                        
-                                        # Skip if already processed
-                                        if not title or title in processed_titles:
-                                            continue
-                                            
-                                        processed_titles.add(title)
-                                        
-                                        # Handle boolean fields and other advanced fields
-                                        if "پارکینگ" in title:
-                                            has_parking = False if "ندارد" in value_text else True
-                                            logging.debug(f"[{token}] Modal: Found parking = {has_parking}")
-                                        elif "انباری" in title:
-                                            has_storage = False if "ندارد" in value_text else True
-                                            logging.debug(f"[{token}] Modal: Found storage = {has_storage}")
-                                        elif "بالکن" in title:
-                                            has_balcony = False if "ندارد" in value_text else True
-                                            logging.debug(f"[{token}] Modal: Found balcony = {has_balcony}")
-                                        elif title == 'سند':
-                                            title_deed_type = value_text
-                                        elif title == 'جهت ساختمان':
-                                            building_direction = value_text
-                                        elif title == 'وضعیت واحد':
-                                            renovation_status = value_text
-                                        elif title == 'جنس کف':
-                                            floor_material = value_text
-                                        elif title == 'سرویس بهداشتی':
-                                            bathroom_type = value_text
-                                        elif title == 'سرمایش':
-                                            cooling_system = value_text
-                                        elif title == 'گرمایش':
-                                            heating_system = value_text
-                                        elif title == 'تأمین‌کننده آب گرم':
-                                            hot_water_system = value_text
-                                        
-                                        # Add to attributes
-                                        attr_dict = {"title": title}
-                                        if value_text:
-                                            attr_dict["value"] = value_text
-                                        
-                                        if "ندارد" in value_text:
-                                            attr_dict["available"] = False
-                                        elif "دارد" in value_text:
-                                            attr_dict["available"] = True
-                                            
-                                        attributes.append(attr_dict)
-                
-                # Check for amenities sections specifically
-                amenity_sections = modal_dialog.select("div[class*='amenities'], div[class*='features'], div[class*='امکانات']")
-                
-                for amenity_section in amenity_sections:
-                    amenity_items = amenity_section.select("div.row-item, span.row-item, div[class*='item'], li")
-                    
-                    for amenity in amenity_items:
-                        amenity_text = amenity.get_text(strip=True)
-                        
-                        # Check for key amenities
-                        if "پارکینگ" in amenity_text:
-                            has_parking = True
-                            logging.debug(f"[{token}] Modal amenities: Found parking")
-                        elif "انباری" in amenity_text:
-                            has_storage = True
-                            logging.debug(f"[{token}] Modal amenities: Found storage")
-                        elif "بالکن" in amenity_text:
-                            has_balcony = True
-                            logging.debug(f"[{token}] Modal amenities: Found balcony")
-                            
-                        # Add to attributes if not already processed
-                        if amenity_text and amenity_text not in processed_titles:
-                            attributes.append({"title": amenity_text, "available": True})
-                            processed_titles.add(amenity_text)
-
-        # Log conversion counts for key fields
-        if not area:
-            logging.warning(f"[{token}] Failed to extract area field")
-        if not bedrooms:
-            logging.warning(f"[{token}] Failed to extract bedrooms field")
-        if not price:
-            logging.warning(f"[{token}] Failed to extract price field")
-            
-        # Check for boolean fields - provide explicit debugging
-        logging.debug(f"[{token}] Boolean values - Parking: {has_parking}, Storage: {has_storage}, Balcony: {has_balcony}")
-
-        # Assign all extracted values to the details dictionary
-        details['price'] = price
-        details['price_per_meter'] = price_per_meter
-        details['area'] = area
-        details['land_area'] = land_area
-        details['property_type'] = property_type
-        details['year_built'] = year_built
-        details['bedrooms'] = bedrooms
-        details['has_parking'] = has_parking
-        details['has_storage'] = has_storage
-        details['has_balcony'] = has_balcony
-        details['title_deed_type'] = title_deed_type
-        details['building_direction'] = building_direction
-        details['renovation_status'] = renovation_status
-        details['floor_material'] = floor_material
-        details['bathroom_type'] = bathroom_type
-        details['cooling_system'] = cooling_system
-        details['heating_system'] = heating_system
-        details['hot_water_system'] = hot_water_system
-        details['attributes'] = attributes
-        
-        logging.debug(f"[{token}] Parsed area: {area}, year: {year_built}, beds: {bedrooms}, price: {price}")
-        logging.debug(f"[{token}] Extracted {len(attributes)} generic attributes.")
-
-        # Final validation
-        if details['title'] == 'N/A':
-            logging.error(f"[{token}] Critical data (Title) not extracted.")
-
-        logging.info(f"[{token}] Successfully parsed details for: '{details.get('title', 'N/A')[:50]}...'")
         return details
-
+        
     except Exception as e:
-        logging.error(f"[{token}] Error during BeautifulSoup parsing: {e}", exc_info=True)
-        # Save debug HTML if needed
-        if logging.getLogger().level <= logging.DEBUG:
-            debug_filename = Path(JSON_OUTPUT_DIR) / f"{token}_error.html"
-            try:
-                with open(debug_filename, "w", encoding="utf-8") as f:
-                    f.write(html_content)
-                logging.debug(f"[{token}] Saved debug HTML to {debug_filename}")
-            except Exception as debug_e:
-                logging.debug(f"[{token}] Could not save debug HTML: {debug_e}")
+        logging.error(f"[{token}] Error during extraction: {e}", exc_info=True)
         return None
 
-
-# --- Transform Function (No change needed) ---
+# Transform function remains the same
 def transform_for_db(extracted_data: dict) -> dict | None:
-    if not extracted_data: return None
+    if not extracted_data: 
+        return None
     if not extracted_data.get("external_id") or not extracted_data.get("title") or extracted_data.get("title") == 'N/A':
         logging.error(f"Transform: Missing critical data (ID or Title) for token {extracted_data.get('external_id')}. Skipping DB insert.")
         return None
