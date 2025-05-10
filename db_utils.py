@@ -61,29 +61,37 @@ async def close_db_pool():
 
 
 async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
-    """Calls the import_mongodb_property function in PostgreSQL."""
-    # (Function content remains the same as the previous version)
+    """Calls the new insert_property_direct function in PostgreSQL."""
     external_id = property_data.get("p_external_id")
     try:
-        # ... (JSON formatting and None handling as before) ...
+        # JSON formatting and None handling
         location_json = json.dumps(property_data.get("p_location")) if property_data.get("p_location") else None
         attributes_json = json.dumps(property_data.get("p_attributes", []), ensure_ascii=False)
         image_urls_json = json.dumps(property_data.get("p_image_urls", []))
         highlight_flags_json = json.dumps(property_data.get("p_highlight_flags", []), ensure_ascii=False)
         similar_properties_json = json.dumps(property_data.get("p_similar_properties", []))
 
+        # Ensure these are actual numbers or None
         price = property_data.get("p_price")
+        price_per_meter = property_data.get("p_price_per_meter")
         investment_score = property_data.get("p_investment_score")
         neighborhood_fit_score = property_data.get("p_neighborhood_fit_score")
         rent_to_price_ratio = property_data.get("p_rent_to_price_ratio")
 
-        logging.debug(f"[{external_id}] Calling import_mongodb_property with data...")
+        # Ensure boolean values are properly typed
+        has_parking = bool(property_data.get("p_has_parking", False))
+        has_storage = bool(property_data.get("p_has_storage", False))
+        has_balcony = bool(property_data.get("p_has_balcony", False))
+
+        logging.debug(f"[{external_id}] Calling insert_property_direct with data...")
+        logging.debug(f"[{external_id}] Boolean values: parking={has_parking}, storage={has_storage}, balcony={has_balcony}")
 
         result_id = await conn.fetchval(
             """
-            SELECT import_mongodb_property(
+            SELECT insert_property_direct(
                 $1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb,
-                $8, $9, $10, $11, $12::jsonb, $13::jsonb
+                $8, $9, $10, $11, $12::jsonb, $13::jsonb,
+                $14, $15, $16, $17
             )
             """,
             external_id,
@@ -98,7 +106,11 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
             neighborhood_fit_score,
             rent_to_price_ratio,
             highlight_flags_json,
-            similar_properties_json
+            similar_properties_json,
+            price_per_meter,
+            has_parking,
+            has_storage,
+            has_balcony
         )
         logging.info(f"[{external_id}] Successfully saved/updated property. DB ID: {result_id}")
         return result_id

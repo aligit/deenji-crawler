@@ -177,7 +177,7 @@ async def main():
 
     # Test mode configuration
     TEST_MODE = False
-    TEST_TOKEN = "AaA0POtn"
+    TEST_TOKEN = "Aae8wB29"
     API_ONLY_TEST = False
     
     if TEST_MODE:

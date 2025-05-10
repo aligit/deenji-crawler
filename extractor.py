@@ -397,6 +397,7 @@ async def extract_property_details(html_content: str, token: str, extract_api_on
         return None
 
 # Transform function remains the same
+# In extractor.py, update the transform_for_db function to handle edge cases better
 def transform_for_db(extracted_data: dict) -> dict | None:
     if not extracted_data: 
         return None
@@ -420,31 +421,58 @@ def transform_for_db(extracted_data: dict) -> dict | None:
         "p_similar_properties": []
     }
     
-    # Handle numeric fields with proper conversion
+    # Handle numeric fields with proper conversion and extra validation
     numeric_fields = ['price', 'price_per_meter', 'area', 'land_area', 'year_built', 'bedrooms']
     for field in numeric_fields:
         value = extracted_data.get(field)
         if value is not None:
             try:
-                db_data[f"p_{field}"] = int(float(value))
-            except (ValueError, TypeError):
+                # Convert to string first to handle edge cases
+                str_value = str(value).strip()
+                if str_value and str_value != 'None' and str_value != 'null':
+                    # Try to convert to float first, then int
+                    float_value = float(str_value)
+                    # For integers, convert to int
+                    if field in ['year_built', 'bedrooms']:
+                        db_data[f"p_{field}"] = int(float_value)
+                    # For potentially decimal values, keep as int if whole number
+                    else:
+                        db_data[f"p_{field}"] = int(float_value) if float_value == int(float_value) else float_value
+                else:
+                    db_data[f"p_{field}"] = None
+            except (ValueError, TypeError, OverflowError) as e:
+                logging.debug(f"[{db_data['p_external_id']}] Could not convert {field}={value} to number: {e}")
                 db_data[f"p_{field}"] = None
         else:
             db_data[f"p_{field}"] = None
     
-    # Handle boolean fields
+    # Handle boolean fields properly - ensure they're actual booleans, not strings
     boolean_fields = ['has_parking', 'has_storage', 'has_balcony']
     for field in boolean_fields:
-        db_data[f"p_{field}"] = bool(extracted_data.get(field, False))
+        # Convert to boolean explicitly - make sure it's True/False, not 'true'/'false'
+        value = extracted_data.get(field, False)
+        if isinstance(value, str):
+            # If it's a string, convert properly
+            db_data[f"p_{field}"] = value.lower() in ('true', '1', 'yes', 'بله')
+        else:
+            # If it's already a boolean, keep it as is
+            db_data[f"p_{field}"] = bool(value)
+        
+        # Debug logging
+        logging.debug(f"[{db_data['p_external_id']}] {field}: {db_data[f'p_{field}']} (type: {type(db_data[f'p_{field}'])})")
     
-    # Handle text fields
+    # Handle text fields - ensure they're not empty strings where we want None
     text_fields = [
         'property_type', 'title_deed_type', 'building_direction', 
         'renovation_status', 'floor_material', 'bathroom_type',
-        'cooling_system', 'heating_system', 'hot_water_system'
+        'cooling_system', 'heating_system', 'hot_water_system', 'floor_info'
     ]
     for field in text_fields:
-        db_data[f"p_{field}"] = extracted_data.get(field)
+        value = extracted_data.get(field)
+        if value is not None and str(value).strip():
+            db_data[f"p_{field}"] = str(value).strip()
+        else:
+            db_data[f"p_{field}"] = None
     
     # Add core attributes if they're not already there
     core_attrs = {
@@ -454,7 +482,8 @@ def transform_for_db(extracted_data: dict) -> dict | None:
         'ساخت': extracted_data.get('year_built'), 
         'اتاق': extracted_data.get('bedrooms'), 
         'قیمت کل': extracted_data.get('price'),
-        'قیمت هر متر': extracted_data.get('price_per_meter')
+        'قیمت هر متر': extracted_data.get('price_per_meter'),
+        'طبقه': extracted_data.get('floor_info')
     }
     
     # Only add non-None attributes that aren't already in the list
@@ -462,6 +491,18 @@ def transform_for_db(extracted_data: dict) -> dict | None:
     for title, value in core_attrs.items():
         if value is not None and title not in existing_attr_titles:
             db_data['p_attributes'].append({"title": title, "value": str(value)})
+    
+    # If property_type is still None, try to extract it from attributes
+    if db_data.get('p_property_type') is None:
+        for attr in db_data.get('p_attributes', []):
+            if attr.get('title') == 'نوع ملک':
+                db_data['p_property_type'] = attr.get('value')
+                break
+    
+    # Final validation for numeric fields that will be sent to the database
+    for field in ['investment_score', 'neighborhood_fit_score', 'rent_to_price_ratio']:
+        if field in db_data and db_data[field] == '':
+            db_data[field] = None
     
     logging.debug(f"[{db_data['p_external_id']}] Transformed data for DB.")
     return db_data
