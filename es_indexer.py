@@ -20,13 +20,20 @@ class DivarElasticsearchIndexer:
         
     async def init_client(self):
         """Initialize Elasticsearch client"""
-        self.es = Elasticsearch([self.es_host])
+        # Create client with explicit compatibility headers
+        self.es = Elasticsearch(
+            [self.es_host],
+            headers={
+                "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
+                "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"
+            }
+        )
         logging.info(f"Elasticsearch client initialized for {self.es_host}")
         
         # Test connection
         try:
             info = self.es.info()
-            logging.info(f"Connected to Elasticsearch cluster: {info['name']}")
+            logging.info(f"Connected to Elasticsearch cluster: {info['name']} (version: {info.get('version', {}).get('number', 'unknown')})")
         except Exception as e:
             logging.error(f"Failed to connect to Elasticsearch: {e}")
             raise

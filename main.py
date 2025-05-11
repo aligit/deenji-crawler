@@ -11,6 +11,7 @@ from pathlib import Path
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from db_utils import init_db_pool, close_db_pool, save_property_to_db
 from extractor import extract_property_details, transform_for_db
+from es_indexer import DivarElasticsearchIndexer  # Import the indexer
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,6 +23,9 @@ MAX_CONCURRENT_CRAWLS = 3
 JSON_OUTPUT_DIR = "output_json"
 
 Path(JSON_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+
+# --- Create global indexer instance ---
+es_indexer = DivarElasticsearchIndexer()
 
 # --- API Fetch Function ---
 async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
@@ -154,6 +158,15 @@ async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: 
         try:
             async with db_pool.acquire() as db_conn:
                 await save_property_to_db(db_conn, db_data)
+                
+            # Index in Elasticsearch after successful DB save
+            try:
+                await es_indexer.index_property(db_data)
+                logging.info(f"[{token}] Successfully indexed property in Elasticsearch")
+            except Exception as es_error:
+                logging.error(f"[{token}] Error indexing property in Elasticsearch: {es_error}")
+                # Continue even if Elasticsearch fails
+                
         except Exception as db_e:
             logging.error(f"[{token}] Failed to acquire DB connection or save: {db_e}", exc_info=True)
     elif db_data and not db_pool:
@@ -172,6 +185,18 @@ async def crawl_and_save_property(crawler, db_pool: asyncpg.Pool | None, token: 
 async def main():
     """Main orchestration function."""
     db_pool_instance = await init_db_pool() # Initialize the pool
+    
+    # Initialize Elasticsearch
+    try:
+        await es_indexer.init_client()
+        await es_indexer.create_indexes()
+        logging.info("Elasticsearch initialized successfully")
+    except Exception as e:
+        logging.error(f"Failed to initialize Elasticsearch: {e}")
+        # You can decide whether to continue without Elasticsearch or exit
+        # For now, let's continue but with a warning
+        logging.warning("Continuing without Elasticsearch indexing...")
+    
     # Simple proxy configuration
     PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
 
@@ -313,6 +338,8 @@ async def main():
          logging.error(f"An error occurred during the main crawl loop: {e}", exc_info=True)
     finally:
         if db_pool_instance: await close_db_pool()
+        # Close Elasticsearch client
+        await es_indexer.close_client()
         logging.info(f"Crawling finished or stopped. Processed {len(crawled_tokens)} unique properties.")
         logging.info(f"Check the '{JSON_OUTPUT_DIR}' directory for saved JSON files.")
 

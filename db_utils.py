@@ -1,3 +1,5 @@
+# db_utils.py
+
 import asyncpg
 import os
 import logging
@@ -30,6 +32,7 @@ async def init_db_pool() -> asyncpg.Pool | None:
              await conn.execute('SELECT 1')
         logging.info("Database pool initialized and connection verified.")
         _pool = pool_instance # Assign to module-level variable
+        
         return _pool # Return the created pool
     except (asyncpg.exceptions.InvalidConnectionParametersError,
             asyncpg.exceptions.CannotConnectNowError,
@@ -112,6 +115,7 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
             has_storage,
             has_balcony
         )
+        
         logging.info(f"[{external_id}] Successfully saved/updated property. DB ID: {result_id}")
         return result_id
     except asyncpg.exceptions.UniqueViolationError:
