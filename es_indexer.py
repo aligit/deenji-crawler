@@ -4,7 +4,6 @@ import logging
 import os
 import json
 from elasticsearch import Elasticsearch
-from elasticsearch.dsl import Document, Keyword, Text, Long, Integer, Boolean, Object, Date, Index, InnerDoc
 from datetime import datetime
 from typing import Dict, List, Optional
 from dotenv import load_dotenv
@@ -17,22 +16,23 @@ class DivarElasticsearchIndexer:
         self.property_index = "divar_properties"
         self.suggestion_index = "divar_suggestions"
         self.es = None
+        self.headers = {
+            "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
+            "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"
+        }
         
     async def init_client(self):
         """Initialize Elasticsearch client"""
         # Create client with explicit compatibility headers
         self.es = Elasticsearch(
             [self.es_host],
-            headers={
-                "Accept": "application/vnd.elasticsearch+json; compatible-with=8",
-                "Content-Type": "application/vnd.elasticsearch+json; compatible-with=8"
-            }
+            headers=self.headers
         )
         logging.info(f"Elasticsearch client initialized for {self.es_host}")
         
         # Test connection
         try:
-            info = self.es.info()
+            info = self.es.options(headers=self.headers).info()
             logging.info(f"Connected to Elasticsearch cluster: {info['name']} (version: {info.get('version', {}).get('number', 'unknown')})")
         except Exception as e:
             logging.error(f"Failed to connect to Elasticsearch: {e}")
@@ -48,13 +48,19 @@ class DivarElasticsearchIndexer:
         """Create indexes with proper mappings"""
         
         # Delete existing indexes if they exist
-        if self.es.indices.exists(index=self.property_index):
-            self.es.indices.delete(index=self.property_index)
-            logging.info(f"Deleted existing index: {self.property_index}")
+        try:
+            if self.es.options(headers=self.headers).indices.exists(index=self.property_index):
+                self.es.options(headers=self.headers).indices.delete(index=self.property_index)
+                logging.info(f"Deleted existing index: {self.property_index}")
+        except:
+            pass
             
-        if self.es.indices.exists(index=self.suggestion_index):
-            self.es.indices.delete(index=self.suggestion_index)
-            logging.info(f"Deleted existing index: {self.suggestion_index}")
+        try:
+            if self.es.options(headers=self.headers).indices.exists(index=self.suggestion_index):
+                self.es.options(headers=self.headers).indices.delete(index=self.suggestion_index)
+                logging.info(f"Deleted existing index: {self.suggestion_index}")
+        except:
+            pass
         
         # Property index mapping
         property_mapping = {
@@ -157,7 +163,7 @@ class DivarElasticsearchIndexer:
         
         # Create property index
         try:
-            self.es.indices.create(index=self.property_index, body=property_mapping)
+            self.es.options(headers=self.headers).indices.create(index=self.property_index, body=property_mapping)
             logging.info(f"Created property index: {self.property_index}")
         except Exception as e:
             logging.error(f"Error creating property index: {e}")
@@ -165,7 +171,7 @@ class DivarElasticsearchIndexer:
             
         # Create suggestion index
         try:
-            self.es.indices.create(index=self.suggestion_index, body=suggestion_mapping)
+            self.es.options(headers=self.headers).indices.create(index=self.suggestion_index, body=suggestion_mapping)
             logging.info(f"Created suggestion index: {self.suggestion_index}")
         except Exception as e:
             logging.error(f"Error creating suggestion index: {e}")
@@ -209,7 +215,7 @@ class DivarElasticsearchIndexer:
             doc = {k: v for k, v in doc.items() if v is not None}
             
             # Index the document
-            self.es.index(
+            self.es.options(headers=self.headers).index(
                 index=self.property_index,
                 id=property_data.get("p_external_id"),
                 document=doc
@@ -342,7 +348,7 @@ class DivarElasticsearchIndexer:
         for suggestion in suggestions:
             suggestion["created_at"] = datetime.now().isoformat()
             try:
-                self.es.index(
+                self.es.options(headers=self.headers).index(
                     index=self.suggestion_index,
                     document=suggestion
                 )
@@ -407,7 +413,7 @@ class DivarElasticsearchIndexer:
         
         # Execute search
         try:
-            response = self.es.search(
+            response = self.es.options(headers=self.headers).search(
                 index=self.property_index,
                 body=search_query,
                 size=20
@@ -449,7 +455,7 @@ class DivarElasticsearchIndexer:
         }
         
         try:
-            response = self.es.search(
+            response = self.es.options(headers=self.headers).search(
                 index=self.suggestion_index,
                 body=search_query
             )
