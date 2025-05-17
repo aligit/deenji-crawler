@@ -177,10 +177,13 @@ class DivarElasticsearchIndexer:
             logging.error(f"Error creating suggestion index: {e}")
             raise
     
+    # Ensure the Elasticsearch index_property method properly handles attributes
+    # Update Elasticsearch index_property method in es_indexer.py
+
     async def index_property(self, property_data: Dict):
-        """Index a single property"""
+        """Index a single property with improved attribute handling"""
         try:
-            # Prepare document
+            # Prepare document with direct field mapping
             doc = {
                 "external_id": property_data.get("p_external_id"),
                 "title": property_data.get("p_title"),
@@ -210,6 +213,46 @@ class DivarElasticsearchIndexer:
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
+            
+            # For fields that might be missing, try to extract from attributes
+            attributes = property_data.get("p_attributes", [])
+            
+            # Extract bedrooms if missing
+            if doc["bedrooms"] is None:
+                for attr in attributes:
+                    if attr.get('title') == 'اتاق':
+                        value = attr.get('value')
+                        if value:
+                            try:
+                                # Use the parse_persian_number function if available, or simple conversion
+                                if 'parse_persian_number' in globals():
+                                    doc["bedrooms"] = parse_persian_number(value)
+                                else:
+                                    # Simple numeric extraction fallback
+                                    cleaned = re.sub(r'[^\d]', '', value)
+                                    if cleaned:
+                                        doc["bedrooms"] = int(cleaned)
+                                break
+                            except Exception:
+                                pass
+            
+            # Extract bathroom_type if missing
+            if not doc["bathroom_type"]:
+                for attr in attributes:
+                    title = attr.get('title', '')
+                    key = attr.get('key')
+                    if 'سرویس بهداشتی' in title and key == 'WC' and attr.get('available', False):
+                        doc["bathroom_type"] = title.replace('سرویس بهداشتی', '').strip()
+                        break
+            
+            # Extract heating_system if missing
+            if not doc["heating_system"]:
+                for attr in attributes:
+                    title = attr.get('title', '')
+                    key = attr.get('key')
+                    if 'گرمایش' in title and key == 'SUNNY' and attr.get('available', False):
+                        doc["heating_system"] = title.replace('گرمایش', '').strip()
+                        break
             
             # Remove None values
             doc = {k: v for k, v in doc.items() if v is not None}

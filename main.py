@@ -201,7 +201,7 @@ async def main():
     PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
 
     # Test mode configuration
-    TEST_MODE = False
+    TEST_MODE = False    # True or False
     TEST_TOKEN = "Aae8wB29"
     API_ONLY_TEST = False
     

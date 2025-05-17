@@ -179,12 +179,13 @@ def extract_attributes_from_api(api_data: dict) -> dict:
                     title = item.get('title', '').strip()
                     available = item.get('available', False)
                     icon = item.get('icon', {})
+                    icon_name = icon.get('icon_name', '')
                     
                     # Store in attributes list
                     attributes.append({
                         'title': title,
                         'available': available,
-                        'key': icon.get('icon_name', '')
+                        'key': icon_name
                     })
                     
                     # Map to boolean fields
@@ -194,6 +195,18 @@ def extract_attributes_from_api(api_data: dict) -> dict:
                         has_storage = available
                     elif 'بالکن' in title:
                         has_balcony = available
+                    
+                    # Map feature fields with key
+                    if 'جنس کف' in title and available:
+                        floor_material = title.replace('جنس کف', '').strip()
+                    elif 'سرویس بهداشتی' in title and available and icon_name == 'WC':
+                        bathroom_type = title.replace('سرویس بهداشتی', '').strip()
+                    elif 'سرمایش' in title and available and icon_name == 'SNOWFLAKE':
+                        cooling_system = title.replace('سرمایش', '').strip()
+                    elif 'گرمایش' in title and available and icon_name == 'SUNNY':
+                        heating_system = title.replace('گرمایش', '').strip()
+                    elif 'تأمین‌کننده آب گرم' in title and available and icon_name == 'THERMOMETER':
+                        hot_water_system = title.replace('تأمین‌کننده آب گرم', '').strip()
                 
                 # Process modal page data (advanced attributes)
                 action = data.get('action', {})
@@ -222,25 +235,49 @@ def extract_attributes_from_api(api_data: dict) -> dict:
                         elif widget.get('widget_type') == 'FEATURE_ROW':
                             feature_data = widget.get('data', {})
                             title = feature_data.get('title', '').strip()
+                            icon_data = feature_data.get('icon', {})
+                            icon_name = icon_data.get('icon_name', '')
                             
                             # Add to attributes
                             attributes.append({
                                 'title': title,
                                 'available': True,  # Features in modal are available
-                                'key': feature_data.get('icon', {}).get('icon_name', '')
+                                'key': icon_name
                             })
                             
                             # Map feature fields
                             if 'جنس کف' in title:
-                                floor_material = title.replace('جنس کف ', '')
-                            elif 'سرویس بهداشتی' in title:
-                                bathroom_type = title.replace('سرویس بهداشتی ', '')
-                            elif 'سرمایش' in title:
-                                cooling_system = title.replace('سرمایش ', '')
-                            elif 'گرمایش' in title:
-                                heating_system = title.replace('گرمایش ', '')
-                            elif 'تأمین‌کننده آب گرم' in title:
-                                hot_water_system = title.replace('تأمین‌کننده آب گرم ', '')
+                                floor_material = title.replace('جنس کف', '').strip()
+                            elif 'سرویس بهداشتی' in title and icon_name == 'WC':
+                                bathroom_type = title.replace('سرویس بهداشتی', '').strip()
+                            elif 'سرمایش' in title and icon_name == 'SNOWFLAKE':
+                                cooling_system = title.replace('سرمایش', '').strip()
+                            elif 'گرمایش' in title and icon_name == 'SUNNY':
+                                heating_system = title.replace('گرمایش', '').strip()
+                            elif 'تأمین‌کننده آب گرم' in title and icon_name == 'THERMOMETER':
+                                hot_water_system = title.replace('تأمین‌کننده آب گرم', '').strip()
+    
+    # Second pass - if values are still None, try to extract from the compiled attributes list
+    if not bedrooms:
+        bedrooms = extract_value_from_attributes(attributes, 'اتاق', is_numeric=True)
+    
+    if not year_built:
+        year_built = extract_value_from_attributes(attributes, 'ساخت', is_numeric=True)
+    
+    if not bathroom_type:
+        bathroom_type = extract_feature_from_attributes(attributes, 'سرویس بهداشتی', key='WC')
+    
+    if not heating_system:
+        heating_system = extract_feature_from_attributes(attributes, 'گرمایش', key='SUNNY')
+    
+    if not cooling_system:
+        cooling_system = extract_feature_from_attributes(attributes, 'سرمایش', key='SNOWFLAKE')
+    
+    if not hot_water_system:
+        hot_water_system = extract_feature_from_attributes(attributes, 'تأمین‌کننده آب گرم', key='THERMOMETER')
+    
+    if not floor_material:
+        floor_material = extract_feature_from_attributes(attributes, 'جنس کف', key='TEXTURE')
     
     return {
         'attributes': attributes,
@@ -396,9 +433,13 @@ async def extract_property_details(html_content: str, token: str, extract_api_on
         logging.error(f"[{token}] Error during extraction: {e}", exc_info=True)
         return None
 
-# Transform function remains the same
-# In extractor.py, update the transform_for_db function to handle edge cases better
+# Add this to the transform_for_db function after initializing db_data
+# Update transform_for_db function in extractor.py
+
 def transform_for_db(extracted_data: dict) -> dict | None:
+    """
+    Transform extracted data into database-ready format with robust fallback extraction for special attributes
+    """
     if not extracted_data: 
         return None
     if not extracted_data.get("external_id") or not extracted_data.get("title") or extracted_data.get("title") == 'N/A':
@@ -474,6 +515,72 @@ def transform_for_db(extracted_data: dict) -> dict | None:
         else:
             db_data[f"p_{field}"] = None
     
+    # FALLBACK EXTRACTION: If specific fields are still None, try to extract them from attributes
+    attributes = db_data.get('p_attributes', [])
+    
+    # Try to extract bedrooms from attributes if still None
+    if db_data.get('p_bedrooms') is None:
+        for attr in attributes:
+            if attr.get('title') == 'اتاق':
+                value = attr.get('value')
+                if value:
+                    try:
+                        db_data['p_bedrooms'] = parse_persian_number(value)
+                        logging.info(f"[{db_data['p_external_id']}] Extracted bedrooms from attributes: {db_data['p_bedrooms']}")
+                        break
+                    except Exception as e:
+                        logging.debug(f"[{db_data['p_external_id']}] Error parsing bedroom value: {e}")
+    
+    # Try to extract bathroom_type from attributes if still None
+    if db_data.get('p_bathroom_type') is None:
+        for attr in attributes:
+            title = attr.get('title', '')
+            key = attr.get('key')
+            if 'سرویس بهداشتی' in title and key == 'WC' and attr.get('available', False):
+                db_data['p_bathroom_type'] = title.replace('سرویس بهداشتی', '').strip()
+                logging.info(f"[{db_data['p_external_id']}] Extracted bathroom_type from attributes: {db_data['p_bathroom_type']}")
+                break
+    
+    # Try to extract heating_system from attributes if still None
+    if db_data.get('p_heating_system') is None:
+        for attr in attributes:
+            title = attr.get('title', '')
+            key = attr.get('key')
+            if 'گرمایش' in title and key == 'SUNNY' and attr.get('available', False):
+                db_data['p_heating_system'] = title.replace('گرمایش', '').strip()
+                logging.info(f"[{db_data['p_external_id']}] Extracted heating_system from attributes: {db_data['p_heating_system']}")
+                break
+    
+    # Try to extract cooling_system from attributes if still None
+    if db_data.get('p_cooling_system') is None:
+        for attr in attributes:
+            title = attr.get('title', '')
+            key = attr.get('key')
+            if 'سرمایش' in title and key == 'SNOWFLAKE' and attr.get('available', False):
+                db_data['p_cooling_system'] = title.replace('سرمایش', '').strip()
+                logging.info(f"[{db_data['p_external_id']}] Extracted cooling_system from attributes: {db_data['p_cooling_system']}")
+                break
+    
+    # Try to extract hot_water_system from attributes if still None
+    if db_data.get('p_hot_water_system') is None:
+        for attr in attributes:
+            title = attr.get('title', '')
+            key = attr.get('key')
+            if 'تأمین‌کننده آب گرم' in title and key == 'THERMOMETER' and attr.get('available', False):
+                db_data['p_hot_water_system'] = title.replace('تأمین‌کننده آب گرم', '').strip()
+                logging.info(f"[{db_data['p_external_id']}] Extracted hot_water_system from attributes: {db_data['p_hot_water_system']}")
+                break
+    
+    # Try to extract floor_material from attributes if still None
+    if db_data.get('p_floor_material') is None:
+        for attr in attributes:
+            title = attr.get('title', '')
+            key = attr.get('key')
+            if 'جنس کف' in title and key == 'TEXTURE' and attr.get('available', False):
+                db_data['p_floor_material'] = title.replace('جنس کف', '').strip()
+                logging.info(f"[{db_data['p_external_id']}] Extracted floor_material from attributes: {db_data['p_floor_material']}")
+                break
+    
     # Add core attributes if they're not already there
     core_attrs = {
         'متراژ': extracted_data.get('area'), 
@@ -506,3 +613,50 @@ def transform_for_db(extracted_data: dict) -> dict | None:
     
     logging.debug(f"[{db_data['p_external_id']}] Transformed data for DB.")
     return db_data
+
+def extract_value_from_attributes(attributes, title_key, is_numeric=False):
+    """
+    Extract a value from attributes array by title key
+    
+    Args:
+        attributes: List of attribute dictionaries
+        title_key: The title key to search for (exact match)
+        is_numeric: Whether to parse the value as a number using parse_persian_number
+    
+    Returns:
+        The extracted value, or None if not found
+    """
+    if not attributes or not isinstance(attributes, list):
+        return None
+        
+    for attr in attributes:
+        if attr.get('title') == title_key:
+            value = attr.get('value')
+            if is_numeric and value:
+                return parse_persian_number(value)
+            return value
+    return None
+
+def extract_feature_from_attributes(attributes, title_prefix, key=None):
+    """
+    Extract a feature value from attributes array by title prefix
+    
+    Args:
+        attributes: List of attribute dictionaries
+        title_prefix: The prefix to search for in the title
+        key: Optional key to match (like 'WC', 'SUNNY', etc.)
+    
+    Returns:
+        The extracted value (part after prefix), or None if not found
+    """
+    if not attributes or not isinstance(attributes, list):
+        return None
+        
+    for attr in attributes:
+        title = attr.get('title', '')
+        attr_key = attr.get('key')
+        # Check if title contains prefix and either key matches or key check is disabled
+        if title_prefix in title and (key is None or attr_key == key) and attr.get('available', False):
+            # Extract part after the prefix
+            return title.replace(title_prefix, '').strip()
+    return None
