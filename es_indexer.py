@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -45,31 +46,47 @@ class DivarElasticsearchIndexer:
             self.es.close()
             logging.info("Elasticsearch client closed")
 
-    async def create_indexes(self):
-        """Create indexes with proper mappings"""
+    async def create_indexes(self, delete_existing=False):
+        if delete_existing:
+            """Create indexes with proper mappings"""
 
-        # Delete existing indexes if they exist
-        try:
-            if self.es.options(headers=self.headers).indices.exists(
-                index=self.property_index
-            ):
-                self.es.options(headers=self.headers).indices.delete(
+            # Delete existing indexes if they exist
+            try:
+                if self.es.options(headers=self.headers).indices.exists(
+                    index=self.property_index
+                ):
+                    self.es.options(headers=self.headers).indices.delete(
+                        index=self.property_index
+                    )
+                    logging.info(f"Deleted existing index: {self.property_index}")
+            except:
+                pass
+
+            try:
+                if self.es.options(headers=self.headers).indices.exists(
+                    index=self.suggestion_index
+                ):
+                    self.es.options(headers=self.headers).indices.delete(
+                        index=self.suggestion_index
+                    )
+                    logging.info(f"Deleted existing index: {self.suggestion_index}")
+            except:
+                pass
+
+        else:
+            # If indexes exist, log it and continue
+            try:
+                property_exists = self.es.options(headers=self.headers).indices.exists(
                     index=self.property_index
                 )
-                logging.info(f"Deleted existing index: {self.property_index}")
-        except:
-            pass
+                suggestion_exists = self.es.options(
+                    headers=self.headers
+                ).indices.exists(index=self.suggestion_index)
 
-        try:
-            if self.es.options(headers=self.headers).indices.exists(
-                index=self.suggestion_index
-            ):
-                self.es.options(headers=self.headers).indices.delete(
-                    index=self.suggestion_index
-                )
-                logging.info(f"Deleted existing index: {self.suggestion_index}")
-        except:
-            pass
+                if property_exists and suggestion_exists:
+                    logging.info(f"Indexes already exist. Skipping deletion.")
+            except Exception as e:
+                logging.error(f"Error checking for existing indexes: {e}")
 
         # Property index mapping
         property_mapping = {
@@ -249,17 +266,15 @@ class DivarElasticsearchIndexer:
                         value = attr.get("value")
                         if value:
                             try:
-                                # Use the parse_persian_number function if available, or simple conversion
-                                if "parse_persian_number" in globals():
-                                    doc["bedrooms"] = parse_persian_number(value)
-                                else:
-                                    # Simple numeric extraction fallback
-                                    cleaned = re.sub(r"[^\d]", "", value)
-                                    if cleaned:
-                                        doc["bedrooms"] = int(cleaned)
-                                break
-                            except Exception:
-                                pass
+                                from text_utils import \
+                                    parse_persian_number  # type: ignore
+
+                                doc["bedrooms"] = parse_persian_number(value)
+                            except (ImportError, Exception):
+                                cleaned = re.sub(r"[^\d]", "", value)
+                                if cleaned:
+                                    doc["bedrooms"] = int(cleaned)
+                            break
 
             # Extract bathroom_type if missing
             if not doc["bathroom_type"]:
@@ -458,7 +473,9 @@ class DivarElasticsearchIndexer:
             except Exception as e:
                 logging.error(f"Error indexing suggestion: {e}")
 
-    async def search_properties(self, query: str, filters: Dict = None) -> List[Dict]:
+    async def search_properties(
+        self, query: str, filters: Optional[Dict] = None
+    ) -> List[Dict]:
         """Search properties with filters"""
         search_query = {"query": {"bool": {"must": []}}}
 
