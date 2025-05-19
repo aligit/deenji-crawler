@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime
 from typing import Optional
+from text_utils import classify_property_type
 
 JSON_OUTPUT_DIR = "output_json"
 Path(JSON_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
@@ -605,6 +606,19 @@ def transform_for_db(extracted_data: dict) -> dict | None:
             if attr.get('title') == 'نوع ملک':
                 db_data['p_property_type'] = attr.get('value')
                 break
+
+    # Automatic property type classification 
+    if db_data.get('p_property_type') is None:
+        title = db_data.get('p_title', '')
+        description = db_data.get('p_description', '')
+        property_type = classify_property_type(title, description)
+        if property_type:
+            db_data['p_property_type'] = property_type
+            # Also add to attributes if not already there
+            attr_titles = {attr.get('title') for attr in db_data.get('p_attributes', [])}
+            if 'نوع ملک' not in attr_titles:
+                db_data['p_attributes'].append({"title": "نوع ملک", "value": property_type})
+            logging.info(f"[{db_data['p_external_id']}] Classified property type: {property_type}")
     
     # Final validation for numeric fields that will be sent to the database
     for field in ['investment_score', 'neighborhood_fit_score', 'rent_to_price_ratio']:

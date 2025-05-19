@@ -70,6 +70,18 @@ class DivarElasticsearchIndexer:
                         "persian": {
                             "tokenizer": "standard",
                             "filter": ["lowercase", "persian_normalizer"]
+                        },
+                        "persian_edge_ngram": {
+                            "tokenizer": "edge_ngram_tokenizer",
+                            "filter": ["lowercase", "persian_normalizer"]
+                        }
+                    },
+                    "tokenizer": {
+                        "edge_ngram_tokenizer": {
+                            "type": "edge_ngram",
+                            "min_gram": 1,
+                            "max_gram": 15,
+                            "token_chars": ["letter", "digit"]
                         }
                     },
                     "filter": {
@@ -89,6 +101,17 @@ class DivarElasticsearchIndexer:
                     "area": {"type": "long"},
                     "land_area": {"type": "long"},
                     "bedrooms": {"type": "integer"},
+                    "property_type": {
+                        "type": "text",
+                        "analyzer": "persian",
+                        "fields": {
+                            "keyword": {"type": "keyword"},
+                            "ngram": {
+                                "type": "text",
+                                "analyzer": "persian_edge_ngram"
+                            }
+                        }
+                    },
                     "year_built": {"type": "integer"},
                     "property_type": {"type": "keyword"},
                     "has_parking": {"type": "boolean"},
@@ -211,7 +234,8 @@ class DivarElasticsearchIndexer:
                 "image_urls": property_data.get("p_image_urls", []),
                 "location": self._extract_location(property_data),
                 "created_at": datetime.now().isoformat(),
-                "updated_at": datetime.now().isoformat()
+                "updated_at": datetime.now().isoformat(),
+                "property_type": property_data.get("p_property_type"),
             }
             
             # For fields that might be missing, try to extract from attributes
@@ -244,6 +268,16 @@ class DivarElasticsearchIndexer:
                     if 'سرویس بهداشتی' in title and key == 'WC' and attr.get('available', False):
                         doc["bathroom_type"] = title.replace('سرویس بهداشتی', '').strip()
                         break
+
+            # If property_type is missing, classify it on the fly
+            if not doc["property_type"] and doc.get("title"):
+                from text_utils import classify_property_type
+                doc["property_type"] = classify_property_type(
+                    doc.get("title", ""),
+                    doc.get("description", "")
+                )
+                if doc["property_type"]:
+                    logging.info(f"[{property_data.get('p_external_id')}] Classified property type during indexing: {doc['property_type']}")
             
             # Extract heating_system if missing
             if not doc["heating_system"]:
@@ -413,7 +447,14 @@ class DivarElasticsearchIndexer:
             search_query["query"]["bool"]["must"].append({
                 "multi_match": {
                     "query": query,
-                    "fields": ["title^2", "description", "location.neighborhood", "location.district"]
+                    "fields": [
+                        "title^2", 
+                        "description", 
+                        "location.neighborhood", 
+                        "location.district",
+                        "property_type^1.5",      # Regular property_type field
+                        "property_type.ngram"     # ngram field for partial matches
+]
                 }
             })
         
