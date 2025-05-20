@@ -10,10 +10,12 @@ import aiohttp
 import asyncpg  # Ensure this is imported
 from crawl4ai import (AsyncWebCrawler, BrowserConfig, CacheMode,
                       CrawlerRunConfig)
+from dotenv import load_dotenv
 
 from db_utils import close_db_pool, init_db_pool, save_property_to_db
 from es_indexer import DivarElasticsearchIndexer  # Import the indexer
 from extractor import extract_property_details, transform_for_db
+from image_storage import SupabaseStorageManager
 
 # --- Configuration ---
 logging.basicConfig(
@@ -101,7 +103,12 @@ async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
 
 # --- Crawl and Save Function ---
 async def crawl_and_save_property(
-    crawler, db_pool: asyncpg.Pool | None, token: str, slug: str, api_only: bool = False
+    crawler,
+    db_pool: asyncpg.Pool | None,
+    token: str,
+    slug: str,
+    storage_manager=None,
+    api_only: bool = False,
 ):
     """Crawls a single property, saves data to JSON, and attempts DB save with anti-detection measures"""
 
@@ -237,6 +244,10 @@ async def crawl_and_save_property(
             async with db_pool.acquire() as db_conn:
                 await save_property_to_db(db_conn, db_data)
 
+                # Process and store images if storage manager is available
+                if storage_manager:
+                    await storage_manager.process_property_images(db_data, db_conn)
+
             # Index in Elasticsearch after successful DB save
             try:
                 await es_indexer.index_property(db_data)
@@ -276,6 +287,24 @@ async def main():
     """Main orchestration function."""
     db_pool_instance = await init_db_pool()  # Initialize the pool
 
+    load_dotenv()
+    supabase_url = os.getenv(
+        "SUPABASE_STORAGE_URL", "http://127.0.0.1:54321"
+    )  # Local Supabase port
+    supabase_key = os.getenv("SUPABASE_ROLE")
+    if not supabase_key:
+        logging.warning("SUPABASE_KEY not set in environment. Image storage disabled.")
+        storage_manager = None
+    else:
+        storage_manager = SupabaseStorageManager(supabase_url, supabase_key)
+        # Initialize storage bucket
+        bucket_initialized = await storage_manager.init_bucket()
+        if not bucket_initialized:
+            logging.error(
+                "Failed to initialize storage bucket. Image storage disabled."
+            )
+            storage_manager = None
+
     # Initialize Elasticsearch
     try:
         await es_indexer.init_client()
@@ -306,7 +335,12 @@ async def main():
             os.environ["HTTP_PROXY"] = PROXY_URL
             os.environ["HTTPS_PROXY"] = PROXY_URL
             await crawl_and_save_property(
-                None, db_pool_instance, TEST_TOKEN, "test-slug", api_only=True
+                None,
+                db_pool_instance,
+                TEST_TOKEN,
+                "test-slug",
+                storage_manager=storage_manager,
+                api_only=True,
             )
         else:
             browser_config = BrowserConfig(
@@ -321,7 +355,12 @@ async def main():
 
             async with AsyncWebCrawler(config=browser_config) as crawler:
                 await crawl_and_save_property(
-                    crawler, db_pool_instance, TEST_TOKEN, "test-slug", api_only=False
+                    crawler,
+                    db_pool_instance,
+                    TEST_TOKEN,
+                    "test-slug",
+                    storage_manager=storage_manager,
+                    api_only=False,
                 )
 
         logging.info("=== TEST MODE COMPLETED ===")
@@ -439,7 +478,11 @@ async def main():
                         if token and token not in crawled_tokens:
                             crawled_tokens.add(token)
                             await crawl_and_save_property(
-                                crawler, current_pool, token, safe_slug
+                                crawler,
+                                current_pool,
+                                token,
+                                safe_slug,
+                                storage_manager=storage_manager,
                             )  # Pass pool
                         elif token:
                             logging.debug(f"Token {token} already processed. Skipping.")
