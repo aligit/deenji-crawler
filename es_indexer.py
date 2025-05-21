@@ -129,13 +129,18 @@ class DivarElasticsearchIndexer:
                     "area": {"type": "long"},
                     "land_area": {"type": "long"},
                     "bedrooms": {"type": "integer"},
-                    "property_type": {
+                    "property_type_suggest": {
                         "type": "completion",
                         "analyzer": "persian",
                         "contexts": [
                             {"name": "location", "type": "category"},
                             {"name": "stage", "type": "category"},
                         ],
+                    },
+                    "bedrooms_suggest": {
+                        "type": "completion",
+                        "analyzer": "persian",
+                        "contexts": [{"name": "property_type", "type": "category"}],
                     },
                     "year_built": {"type": "integer"},
                     "has_parking": {"type": "boolean"},
@@ -187,6 +192,11 @@ class DivarElasticsearchIndexer:
                         "max_shingle_size": 3,
                         "analyzer": "persian",
                     },
+                    "bedrooms.suggest": {
+                        "type": "completion",
+                        "analyzer": "persian",
+                        "contexts": [{"name": "property_type", "type": "category"}],
+                    },
                     "suggestion_type": {"type": "keyword"},
                     "context": {"type": "keyword"},
                     "priority": {"type": "integer"},
@@ -200,11 +210,6 @@ class DivarElasticsearchIndexer:
                     "property_types": {"type": "keyword"},
                     "features": {"type": "keyword"},
                     "created_at": {"type": "date"},
-                },
-                "bedrooms.suggest": {
-                    "type": "completion",
-                    "analyzer": "persian",
-                    "contexts": [{"name": "property_type", "type": "category"}],
                 },
             },
         }
@@ -260,7 +265,6 @@ class DivarElasticsearchIndexer:
                 "location": self._extract_location(property_data),
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
-                "property_type": property_data.get("p_property_type"),
             }
 
             # For fields that might be missing, try to extract from attributes
@@ -326,11 +330,8 @@ class DivarElasticsearchIndexer:
             # For property type suggestions
             if doc.get("property_type"):
                 property_type = doc["property_type"]
-                doc["property_type.suggest"] = {
-                    "input": [
-                        property_type,
-                        property_type[:3] if len(property_type) > 3 else property_type,
-                    ],
+                doc["property_type_suggest"] = {
+                    "input": [property_type],
                     "contexts": {
                         "location": [doc.get("location", {}).get("city", "تهران")],
                         "stage": ["property_type"],
@@ -339,18 +340,8 @@ class DivarElasticsearchIndexer:
 
             # For bedroom suggestions
             if doc.get("bedrooms"):
-                # Convert number to Persian digits and create variations
-                from text_utils import convert_to_persian_digits
-
-                bedrooms = doc["bedrooms"]
-                persian_number = convert_to_persian_digits(str(bedrooms))
-
-                doc["bedrooms.suggest"] = {
-                    "input": [
-                        persian_number,
-                        f"{persian_number}خوابه",
-                        # Add more variations as needed
-                    ],
+                doc["bedrooms_suggest"] = {
+                    "input": generate_bedroom_variants(doc["bedrooms"]),
                     "contexts": {"property_type": [doc.get("property_type", "")]},
                 }
 
