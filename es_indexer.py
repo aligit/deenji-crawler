@@ -7,7 +7,25 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from dotenv import load_dotenv
+from text_utils import convert_to_persian_digits, generate_bedroom_variants
+
+try:
+    from dotenv import load_dotenv  # type: ignore
+except ImportError:
+    # Fallback definition if package is not available
+    def load_dotenv():
+        import os
+
+        print("Warning: python-dotenv package not found, using fallback implementation")
+        # Read .env file manually if it exists
+        if os.path.exists(".env"):
+            with open(".env") as f:
+                for line in f:
+                    if line.strip() and not line.startswith("#"):
+                        key, value = line.strip().split("=", 1)
+                        os.environ[key] = value
+
+
 from elasticsearch import Elasticsearch
 
 load_dotenv()
@@ -26,13 +44,13 @@ class DivarElasticsearchIndexer:
 
     async def init_client(self):
         """Initialize Elasticsearch client"""
-        # Create client with explicit compatibility headers
+        # Create client with headers directly in the constructor
         self.es = Elasticsearch([self.es_host], headers=self.headers)
         logging.info(f"Elasticsearch client initialized for {self.es_host}")
 
         # Test connection
         try:
-            info = self.es.options(headers=self.headers).info()
+            info = self.es.info()
             logging.info(
                 f"Connected to Elasticsearch cluster: {info['name']} (version: {info.get('version', {}).get('number', 'unknown')})"
             )
@@ -52,23 +70,15 @@ class DivarElasticsearchIndexer:
 
             # Delete existing indexes if they exist
             try:
-                if self.es.options(headers=self.headers).indices.exists(
-                    index=self.property_index
-                ):
-                    self.es.options(headers=self.headers).indices.delete(
-                        index=self.property_index
-                    )
+                if self.es.indices.exists(index=self.property_index):
+                    self.es.indices.delete(index=self.property_index)
                     logging.info(f"Deleted existing index: {self.property_index}")
             except:
                 pass
 
             try:
-                if self.es.options(headers=self.headers).indices.exists(
-                    index=self.suggestion_index
-                ):
-                    self.es.options(headers=self.headers).indices.delete(
-                        index=self.suggestion_index
-                    )
+                if self.es.indices.exists(index=self.suggestion_index):
+                    self.es.indices.delete(index=self.suggestion_index)
                     logging.info(f"Deleted existing index: {self.suggestion_index}")
             except:
                 pass
@@ -76,12 +86,8 @@ class DivarElasticsearchIndexer:
         else:
             # If indexes exist, log it and continue
             try:
-                property_exists = self.es.options(headers=self.headers).indices.exists(
-                    index=self.property_index
-                )
-                suggestion_exists = self.es.options(
-                    headers=self.headers
-                ).indices.exists(index=self.suggestion_index)
+                property_exists = self.es.indices.exists(index=self.property_index)
+                suggestion_exists = self.es.indices.exists(index=self.suggestion_index)
 
                 if property_exists and suggestion_exists:
                     logging.info(f"Indexes already exist. Skipping deletion.")
@@ -124,12 +130,12 @@ class DivarElasticsearchIndexer:
                     "land_area": {"type": "long"},
                     "bedrooms": {"type": "integer"},
                     "property_type": {
-                        "type": "text",
+                        "type": "completion",
                         "analyzer": "persian",
-                        "fields": {
-                            "keyword": {"type": "keyword"},
-                            "ngram": {"type": "text", "analyzer": "persian_edge_ngram"},
-                        },
+                        "contexts": [
+                            {"name": "location", "type": "category"},
+                            {"name": "stage", "type": "category"},
+                        ],
                     },
                     "year_built": {"type": "integer"},
                     "has_parking": {"type": "boolean"},
@@ -194,15 +200,18 @@ class DivarElasticsearchIndexer:
                     "property_types": {"type": "keyword"},
                     "features": {"type": "keyword"},
                     "created_at": {"type": "date"},
-                }
+                },
+                "bedrooms.suggest": {
+                    "type": "completion",
+                    "analyzer": "persian",
+                    "contexts": [{"name": "property_type", "type": "category"}],
+                },
             },
         }
 
         # Create property index
         try:
-            self.es.options(headers=self.headers).indices.create(
-                index=self.property_index, body=property_mapping
-            )
+            self.es.indices.create(index=self.property_index, body=property_mapping)
             logging.info(f"Created property index: {self.property_index}")
         except Exception as e:
             logging.error(f"Error creating property index: {e}")
@@ -210,9 +219,7 @@ class DivarElasticsearchIndexer:
 
         # Create suggestion index
         try:
-            self.es.options(headers=self.headers).indices.create(
-                index=self.suggestion_index, body=suggestion_mapping
-            )
+            self.es.indices.create(index=self.suggestion_index, body=suggestion_mapping)
             logging.info(f"Created suggestion index: {self.suggestion_index}")
         except Exception as e:
             logging.error(f"Error creating suggestion index: {e}")
@@ -316,11 +323,42 @@ class DivarElasticsearchIndexer:
                         doc["heating_system"] = title.replace("گرمایش", "").strip()
                         break
 
+            # For property type suggestions
+            if doc.get("property_type"):
+                property_type = doc["property_type"]
+                doc["property_type.suggest"] = {
+                    "input": [
+                        property_type,
+                        property_type[:3] if len(property_type) > 3 else property_type,
+                    ],
+                    "contexts": {
+                        "location": [doc.get("location", {}).get("city", "تهران")],
+                        "stage": ["property_type"],
+                    },
+                }
+
+            # For bedroom suggestions
+            if doc.get("bedrooms"):
+                # Convert number to Persian digits and create variations
+                from text_utils import convert_to_persian_digits
+
+                bedrooms = doc["bedrooms"]
+                persian_number = convert_to_persian_digits(str(bedrooms))
+
+                doc["bedrooms.suggest"] = {
+                    "input": [
+                        persian_number,
+                        f"{persian_number}خوابه",
+                        # Add more variations as needed
+                    ],
+                    "contexts": {"property_type": [doc.get("property_type", "")]},
+                }
+
             # Remove None values
             doc = {k: v for k, v in doc.items() if v is not None}
 
             # Index the document
-            self.es.options(headers=self.headers).index(
+            self.es.index(
                 index=self.property_index,
                 id=property_data.get("p_external_id"),
                 document=doc,
@@ -467,9 +505,7 @@ class DivarElasticsearchIndexer:
         for suggestion in suggestions:
             suggestion["created_at"] = datetime.now().isoformat()
             try:
-                self.es.options(headers=self.headers).index(
-                    index=self.suggestion_index, document=suggestion
-                )
+                self.es.index(index=self.suggestion_index, document=suggestion)
             except Exception as e:
                 logging.error(f"Error indexing suggestion: {e}")
 
@@ -536,7 +572,7 @@ class DivarElasticsearchIndexer:
 
         # Execute search
         try:
-            response = self.es.options(headers=self.headers).search(
+            response = self.es.search(
                 index=self.property_index, body=search_query, size=20
             )
 
@@ -574,9 +610,7 @@ class DivarElasticsearchIndexer:
         }
 
         try:
-            response = self.es.options(headers=self.headers).search(
-                index=self.suggestion_index, body=search_query
-            )
+            response = self.es.search(index=self.suggestion_index, body=search_query)
 
             return [hit["_source"] for hit in response["hits"]["hits"]]
 
