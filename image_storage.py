@@ -1,12 +1,13 @@
 # image_storage.py
 
-import aiohttp
 import asyncio
 import logging
 import os
 import uuid
-from urllib.parse import urlparse
 from pathlib import Path
+from urllib.parse import urlparse
+
+import aiohttp
 
 
 class SupabaseStorageManager:
@@ -206,6 +207,15 @@ class SupabaseStorageManager:
             logging.error(f"[{external_id}] Property not found in database")
             return
 
+        # First, clear existing images for this property to avoid duplicates
+        try:
+            await db_conn.execute(
+                "DELETE FROM property_images WHERE property_id = $1", property_id
+            )
+            logging.info(f"[{external_id}] Cleared existing images for property")
+        except Exception as e:
+            logging.error(f"[{external_id}] Error clearing existing images: {e}")
+
         # Process each image
         for index, image_url in enumerate(full_size_images):
             # Download image
@@ -218,7 +228,7 @@ class SupabaseStorageManager:
             if not storage_url:
                 continue
 
-            # Save to database
+            # Save to property_images table - without ON CONFLICT clause
             try:
                 is_featured = index == 0  # First image is featured
                 await db_conn.execute(
@@ -226,7 +236,6 @@ class SupabaseStorageManager:
                     INSERT INTO property_images 
                     (property_id, url, is_featured, sort_order, created_at)
                     VALUES ($1, $2, $3, $4, NOW())
-                    ON CONFLICT (property_id, url) DO NOTHING
                     """,
                     property_id,
                     storage_url,
