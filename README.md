@@ -1,6 +1,6 @@
 # Divar Real Estate Crawler
 
-This project uses `crawl4ai` to scrape real estate listings from Divar.ir for Tehran and store the data in a PostgreSQL database.
+This project uses `crawl4ai` to scrape real estate listings from Divar.ir for Tehran and store the data in a PostgreSQL database with Elasticsearch for search and autocomplete functionality.
 
 ## Features
 
@@ -11,6 +11,7 @@ This project uses `crawl4ai` to scrape real estate listings from Divar.ir for Te
 - Leverages PostgreSQL functions defined in migrations for structured data insertion.
 - Includes basic pagination logic for the listing API.
 - Uses environment variables for database configuration.
+- **Elasticsearch integration for fast search and autocomplete functionality**
 
 ## Setup
 
@@ -47,9 +48,11 @@ This project uses `crawl4ai` to scrape real estate listings from Divar.ir for Te
 
 5.  **Configure Environment Variables:**
     - Create a `.env` file in the project root directory.
-    - Add your PostgreSQL connection string:
+    - Add your PostgreSQL connection string and Elasticsearch configuration:
       ```dotenv
       DATABASE_URL=postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:YOUR_PORT/YOUR_DB_NAME
+      ELASTICSEARCH_URL=http://localhost:9200
+      DELETE_ES_INDEXES=true
       ```
 
 ## Running the Crawler
@@ -105,6 +108,187 @@ SET type =
     END
 WHERE type IS NULL; -- Only update rows where type is currently NULL
 ```
+
+## Elasticsearch Autocomplete API
+
+The crawler includes optimized Elasticsearch autocomplete functionality for property types. Here are the different approaches and their use cases:
+
+### Clean Completion Suggestions (Recommended for Autocomplete)
+
+This approach returns **only the suggestion text** with minimal response size (<1KB), perfect for real-time autocomplete:
+
+```bash
+# OPTIMIZED: Clean suggestions only - Fast & lightweight
+curl -X POST "localhost:9200/divar_properties/_search" \
+-H "Content-Type: application/json" \
+-d '{
+  "size": 0,                    # No document hits (saves bandwidth)
+  "_source": false,             # No document sources (faster response)
+  "suggest": {
+    "property_type_completion": {
+      "prefix": "آپ",             # User input prefix
+      "completion": {
+        "field": "property_type_suggest",
+        "size": 10,               # Higher for deduplication
+        "contexts": {
+          "location": ["تهران"],   # Filter by city
+          "stage": ["property_type"]
+        }
+      }
+    }
+  }
+}' | jq '[.suggest.property_type_completion[0].options[].text] | unique'
+```
+
+**Output:** `["آپارتمان"]` (tiny response)
+
+### Example Commands for Different Property Types
+
+**Apartments (آپارتمان):**
+
+```bash
+curl -X POST "localhost:9200/divar_properties/_search" \
+-H "Content-Type: application/json" \
+-d '{
+  "size": 0,
+  "_source": false,
+  "suggest": {
+    "property_type_completion": {
+      "prefix": "آپ",
+      "completion": {
+        "field": "property_type_suggest",
+        "size": 10,
+        "contexts": {
+          "location": ["تهران"],
+          "stage": ["property_type"]
+        }
+      }
+    }
+  }
+}' | jq '[.suggest.property_type_completion[0].options[].text] | unique'
+```
+
+**Villas (ویلا):**
+
+```bash
+curl -X POST "localhost:9200/divar_properties/_search" \
+-H "Content-Type: application/json" \
+-d '{
+  "size": 0,
+  "_source": false,
+  "suggest": {
+    "property_type_completion": {
+      "prefix": "وی",
+      "completion": {
+        "field": "property_type_suggest",
+        "size": 10,
+        "contexts": {
+          "location": ["تهران"],
+          "stage": ["property_type"]
+        }
+      }
+    }
+  }
+}' | jq '[.suggest.property_type_completion[0].options[].text] | unique'
+```
+
+**Land (زمین):**
+
+```bash
+curl -X POST "localhost:9200/divar_properties/_search" \
+-H "Content-Type: application/json" \
+-d '{
+  "size": 0,
+  "_source": false,
+  "suggest": {
+    "property_type_completion": {
+      "prefix": "زم",
+      "completion": {
+        "field": "property_type_suggest",
+        "size": 10,
+        "contexts": {
+          "location": ["تهران"],
+          "stage": ["property_type"]
+        }
+      }
+    }
+  }
+}' | jq '[.suggest.property_type_completion[0].options[].text] | unique'
+```
+
+### Hybrid Approach (Suggestions + Property Previews)
+
+For a Zillow-style experience showing both suggestions and property previews:
+
+```bash
+# HYBRID: Suggestions + Limited property hits
+curl -X POST "localhost:9200/divar_properties/_search" \
+-H "Content-Type: application/json" \
+-d '{
+  "size": 3,                    # Show 3 property previews
+  "_source": ["title", "price", "bedrooms", "area", "image_urls"],  # Essential fields only
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"location.city": "تهران"}},
+        {"term": {"property_type.keyword": "آپارتمان"}}
+      ]
+    }
+  },
+  "suggest": {
+    "property_type_completion": {
+      "prefix": "آپ",
+      "completion": {
+        "field": "property_type_suggest",
+        "size": 5,
+        "contexts": {
+          "location": ["تهران"],
+          "stage": ["property_type"]
+        }
+      }
+    }
+  }
+}'
+```
+
+آپارتمان ۴خوابه بین 70000000000 تا 80000000000
+
+```sh
+curl -X POST "localhost:9200/divar_properties/_search" \
+-H "Content-Type: application/json" \
+-d '{
+  "size": 10,
+  "_source": ["title", "price", "bedrooms", "property_type", "area"],
+  "query": {
+    "bool": {
+      "must": [
+        {"term": {"property_type.keyword": "آپارتمان"}},
+        {"term": {"bedrooms": 4}}
+      ]
+    }
+  }
+}' | jq '{
+  search_query: "آپارتمان ۴خوابه (any price)",
+  total_found: .hits.total.value,
+  results: [.hits.hits[]._source]
+}'
+```
+
+### Performance Comparison
+
+| Approach                           | Response Size | Use Case                              |
+| ---------------------------------- | ------------- | ------------------------------------- |
+| **BEFORE:** Full document hits     | 25KB+         | ❌ Too heavy for autocomplete         |
+| **AFTER:** Clean suggestions only  | <1KB          | ✅ Perfect for real-time autocomplete |
+| **HYBRID:** Suggestions + previews | 5-10KB        | ✅ Rich search experience             |
+
+### Integration Notes
+
+- Use the **clean suggestions** approach for dropdown autocomplete
+- Use the **hybrid approach** for search result pages
+- The `jq` filter `[.suggest.property_type_completion[0].options[].text] | unique` removes duplicates
+- Context filters ensure suggestions are relevant to the selected city
+- Higher `size` values (10 vs 5) improve deduplication effectiveness
 
 ### Supabase
 
