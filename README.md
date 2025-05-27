@@ -251,26 +251,40 @@ curl -X POST "localhost:9200/divar_properties/_search" \
 }'
 ```
 
-آپارتمان ۴خوابه بین 70000000000 تا 80000000000
+آپارتمان ۲خوابه بین 10000000000 تا 20000000000
 
 ```sh
 curl -X POST "localhost:9200/divar_properties/_search" \
 -H "Content-Type: application/json" \
 -d '{
-  "size": 10,
-  "_source": ["title", "price", "bedrooms", "property_type", "area"],
+  "size": 5,
+  "_source": ["title", "price", "bedrooms", "property_type"],
   "query": {
     "bool": {
       "must": [
         {"term": {"property_type.keyword": "آپارتمان"}},
-        {"term": {"bedrooms": 4}}
+        {"term": {"bedrooms": 2}}
+      ],
+      "filter": [
+        {
+          "range": {
+            "price": {
+              "lte": 20000000000,
+              "gte": 10000000000
+            }
+          }
+        }
       ]
     }
   }
 }' | jq '{
-  search_query: "آپارتمان ۴خوابه (any price)",
+  search_criteria: "آپارتمان + ۲خوابه + تا ۱ میلیارد",
   total_found: .hits.total.value,
-  results: [.hits.hits[]._source]
+  results: [.hits.hits[]._source | {
+    title,
+    price: (.price/1000000000 | tostring + " میلیارد"),
+    bedrooms
+  }]
 }'
 ```
 
