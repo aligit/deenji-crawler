@@ -239,6 +239,7 @@ async def crawl_and_save_property(
             )
 
     # --- Attempt to Save to DB (if data valid and pool exists) ---
+    # In crawl_and_save_property function in main.py, change this part:
     if db_data and db_pool:
         try:
             async with db_pool.acquire() as db_conn:
@@ -248,17 +249,16 @@ async def crawl_and_save_property(
                 if storage_manager:
                     await storage_manager.process_property_images(db_data, db_conn)
 
-            # Index in Elasticsearch after successful DB save
-            try:
-                await es_indexer.index_property(db_data)
-                logging.info(
-                    f"[{token}] Successfully indexed property in Elasticsearch"
-                )
-            except Exception as es_error:
-                logging.error(
-                    f"[{token}] Error indexing property in Elasticsearch: {es_error}"
-                )
-                # Continue even if Elasticsearch fails
+                # Index in Elasticsearch INSIDE the connection context
+                try:
+                    await es_indexer.index_property(db_data, db_conn)
+                    logging.info(
+                        f"[{token}] Successfully indexed property in Elasticsearch"
+                    )
+                except Exception as es_error:
+                    logging.error(
+                        f"[{token}] Error indexing property in Elasticsearch: {es_error}"
+                    )
 
         except Exception as db_e:
             logging.error(

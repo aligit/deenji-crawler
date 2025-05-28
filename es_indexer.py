@@ -7,7 +7,7 @@ import re
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from text_utils import convert_to_persian_digits, generate_bedroom_variants
+from text_utils import generate_bedroom_variants
 
 try:
     from dotenv import load_dotenv  # type: ignore
@@ -230,10 +230,7 @@ class DivarElasticsearchIndexer:
             logging.error(f"Error creating suggestion index: {e}")
             raise
 
-    # Ensure the Elasticsearch index_property method properly handles attributes
-    # Update Elasticsearch index_property method in es_indexer.py
-
-    async def index_property(self, property_data: Dict):
+    async def index_property(self, property_data: Dict, db_conn):
         """Index a single property with improved attribute handling"""
         try:
             # Prepare document with direct field mapping
@@ -261,7 +258,9 @@ class DivarElasticsearchIndexer:
                 "heating_system": property_data.get("p_heating_system"),
                 "hot_water_system": property_data.get("p_hot_water_system"),
                 "attributes": property_data.get("p_attributes", []),
-                "image_urls": property_data.get("p_image_urls", []),
+                "image_urls": await self._fetch_property_images(
+                    property_data.get("p_external_id", ""), db_conn
+                ),
                 "location": self._extract_location(property_data),
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
@@ -393,6 +392,28 @@ class DivarElasticsearchIndexer:
             return location
 
         return {"city": "تهران"}
+
+    async def _fetch_property_images(self, external_id: str, db_conn) -> List[str]:
+        """Fetch property images from database"""
+        if not external_id or not db_conn:
+            return []
+
+        try:
+            rows = await db_conn.fetch(
+                """
+                SELECT pi.url 
+                FROM property_images pi
+                JOIN properties p ON pi.property_id = p.id
+                WHERE p.external_id = $1
+                ORDER BY pi.sort_order
+            """,
+                external_id,
+            )
+
+            return [row["url"] for row in rows] if rows else []
+        except Exception as e:
+            logging.error(f"Error fetching images for {external_id}: {e}")
+            return []
 
     async def _generate_suggestions(self, property_doc: Dict):
         """Generate and index suggestions for search_as_you_type"""
