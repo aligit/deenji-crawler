@@ -1,3 +1,6 @@
+# main.py
+
+import argparse
 import asyncio
 import json
 import logging
@@ -17,6 +20,22 @@ from es_indexer import DivarElasticsearchIndexer  # Import the indexer
 from extractor import extract_property_details, transform_for_db
 from image_storage import SupabaseStorageManager
 
+# --- command-line argument parsing ---
+parser = argparse.ArgumentParser(
+    description=(
+        "Divar crawler. If TEST_MODE is False and you provide a single argument, "
+        "we'll read custom-lists/<listname> and crawl only those IDs. "
+        "Otherwise, run the default pagination crawl."
+    )
+)
+parser.add_argument(
+    "listname",
+    nargs="?",
+    help="(optional) name of a file inside custom-lists/ containing one Divar ID per line",
+)
+args = parser.parse_args()
+
+
 # --- Configuration ---
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -32,6 +51,33 @@ Path(JSON_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
 # --- Create global indexer instance ---
 es_indexer = DivarElasticsearchIndexer()
+
+
+def load_tokens_from_file(listname: str) -> list[str]:
+    """
+    Given a listname (e.g. "andarzgu"), open custom-lists/andarzgu,
+    read each non-empty line as a Divar token, return a deduped list.
+    """
+    file_path = Path("custom-lists") / listname
+    if not file_path.exists():
+        logging.error(f"Custom list not found: {file_path}")
+        return []
+
+    tokens = []
+    with file_path.open(encoding="utf-8") as f:
+        for line in f:
+            tok = line.strip()
+            if tok:
+                tokens.append(tok)
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique_tokens = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            unique_tokens.append(t)
+    return unique_tokens
 
 
 # --- API Fetch Function ---
@@ -66,13 +112,11 @@ async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
         },
     }
     if last_sort_date_cursor:
-        # Ensure structure exists before adding pagination key
         server_payload = payload["search_data"]["server_payload"]
         if "additional_form_data" not in server_payload:
             server_payload["additional_form_data"] = {}
         if "data" not in server_payload["additional_form_data"]:
             server_payload["additional_form_data"]["data"] = {}
-        # Add the pagination cursor key (verify 'last_post_date' is correct)
         server_payload["additional_form_data"]["data"]["last_post_date"] = {
             "str": {"value": last_sort_date_cursor}
         }
@@ -239,7 +283,6 @@ async def crawl_and_save_property(
             )
 
     # --- Attempt to Save to DB (if data valid and pool exists) ---
-    # In crawl_and_save_property function in main.py, change this part:
     if db_data and db_pool:
         try:
             async with db_pool.acquire() as db_conn:
@@ -319,9 +362,6 @@ async def main():
         # For now, let's continue but with a warning
         logging.warning("Continuing without Elasticsearch indexing...")
 
-    # Simple proxy configuration
-    PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
-
     # Test mode configuration
     TEST_MODE = False  # True or False
     TEST_TOKEN = "Aae8wB29"
@@ -364,12 +404,50 @@ async def main():
                 )
 
         logging.info("=== TEST MODE COMPLETED ===")
+        # After TEST_MODE finishes, clean up and exit
+        if db_pool_instance:
+            await close_db_pool()
+        await es_indexer.close_client()
         return
 
-    if not db_pool_instance:
-        logging.warning(
-            "Database pool initialization failed. Proceeding with JSON saving only."
-        )  # Changed to warning
+    # If TEST_MODE is False, check for a custom‐list argument
+    if args.listname:
+        tokens = load_tokens_from_file(args.listname)
+        if not tokens:
+            logging.error("No tokens to crawl. Exiting.")
+            # Clean up and return
+            if db_pool_instance:
+                await close_db_pool()
+            await es_indexer.close_client()
+            return
+
+        logging.info(
+            f"Crawling a custom list of {len(tokens)} tokens from custom-lists/{args.listname}"
+        )
+        browser_config_main = BrowserConfig(headless=True, verbose=False)
+        async with AsyncWebCrawler(config=browser_config_main) as crawler:
+            for token in tokens:
+                slug = quote(token)  # generate a safe slug; token itself is fine too
+                await crawl_and_save_property(
+                    crawler,
+                    db_pool_instance,
+                    token,
+                    slug,
+                    storage_manager=storage_manager,
+                    api_only=False,
+                )
+
+        # After finishing the custom list, clean up and exit
+        if db_pool_instance:
+            await close_db_pool()
+        await es_indexer.close_client()
+        logging.info("Custom‐list crawling complete. Exiting.")
+        return
+
+    # --- If no custom list is provided, proceed with the original pagination logic ---
+
+    # Simple proxy configuration
+    PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
 
     # Anti-detection measures
     # Regular crawling with proxy
@@ -399,9 +477,9 @@ async def main():
         remove_overlay_elements=True,
         simulate_user=True,  # Simulate human behavior
         js_code=[
-            f"await new Promise(resolve => setTimeout(resolve, {random.randint(1000, 3000)}));",  # Random wait
+            f"await new Promise(resolve => setTimeout(resolve, {random.randint(1000, 3000)}));",
             "window.scrollTo(0, document.body.scrollHeight);",
-            f"await new Promise(resolve => setTimeout(resolve, {random.randint(500, 1500)}));",  # Another random wait
+            f"await new Promise(resolve => setTimeout(resolve, {random.randint(500, 1500)}));",
             "window.scrollTo(0, 0);",
         ],
         wait_for="css:div.kt-page-title, h1[class*='kt-page-title__title'], div.kt-carousel__cell",
@@ -442,10 +520,8 @@ async def main():
 
                 if not property_widgets:
                     logging.info(f"No 'POST_ROW' widgets on page {page_num}.")
-                    last_sort_date_cursor = (
-                        None  # Reset cursor for next attempt if needed
-                    )
-                    try:  # Try finding sort_date even on empty pages for pagination
+                    last_sort_date_cursor = None
+                    try:
                         last_widget_action_log = listings_data["list_widgets"][-1].get(
                             "action_log", {}
                         )
@@ -483,14 +559,12 @@ async def main():
                                 token,
                                 safe_slug,
                                 storage_manager=storage_manager,
-                            )  # Pass pool
+                            )
                         elif token:
                             logging.debug(f"Token {token} already processed. Skipping.")
 
                 for widget in property_widgets:
-                    tasks.append(
-                        crawl_with_semaphore_wrapper(widget, db_pool_instance)
-                    )  # Pass the pool
+                    tasks.append(crawl_with_semaphore_wrapper(widget, db_pool_instance))
 
                 await asyncio.gather(*tasks)
                 total_properties_processed = len(crawled_tokens)
