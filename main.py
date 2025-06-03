@@ -47,6 +47,9 @@ PAGES_TO_CRAWL = 5
 MAX_CONCURRENT_CRAWLS = 3
 JSON_OUTPUT_DIR = "output_json"
 
+# Simple proxy configuration - MOVED TO TOP
+PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
+
 Path(JSON_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
 
 # --- Create global indexer instance ---
@@ -363,7 +366,7 @@ async def main():
         logging.warning("Continuing without Elasticsearch indexing...")
 
     # Test mode configuration
-    TEST_MODE = False  # True or False
+    TEST_MODE = True  # Changed to False to test actual crawling
     TEST_TOKEN = "Aae8wB29"
     API_ONLY_TEST = False
 
@@ -446,8 +449,9 @@ async def main():
 
     # --- If no custom list is provided, proceed with the original pagination logic ---
 
-    # Simple proxy configuration
-    PROXY_URL = "http://127.0.0.1:10808"  # Your existing proxy
+    # For API calls, also set environment variables
+    os.environ["HTTP_PROXY"] = PROXY_URL
+    os.environ["HTTPS_PROXY"] = PROXY_URL
 
     # Anti-detection measures
     # Regular crawling with proxy
@@ -460,10 +464,6 @@ async def main():
         user_agent="random",
         verbose=False,
     )
-
-    # For API calls, also set environment variables
-    os.environ["HTTP_PROXY"] = PROXY_URL
-    os.environ["HTTPS_PROXY"] = PROXY_URL
 
     # Anti-detection crawler run config
     run_config = CrawlerRunConfig(
