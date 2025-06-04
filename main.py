@@ -18,20 +18,32 @@ from dotenv import load_dotenv
 from db_utils import close_db_pool, init_db_pool, save_property_to_db
 from es_indexer import DivarElasticsearchIndexer  # Import the indexer
 from extractor import extract_property_details, transform_for_db
+from fetch_viewport_listings import (extract_tokens_from_viewport_response,
+                                     fetch_viewport_listings)
 from image_storage import SupabaseStorageManager
+from viewport_api import load_bbox_config
 
 # --- command-line argument parsing ---
 parser = argparse.ArgumentParser(
     description=(
-        "Divar crawler. If TEST_MODE is False and you provide a single argument, "
-        "we'll read custom-lists/<listname> and crawl only those IDs. "
-        "Otherwise, run the default pagination crawl."
+        "Divar crawler with support for custom bounding boxes. "
+        "You can provide a list of IDs to crawl and/or a bounding box configuration."
     )
 )
 parser.add_argument(
-    "listname",
-    nargs="?",
-    help="(optional) name of a file inside custom-lists/ containing one Divar ID per line",
+    "--list",
+    dest="listname",
+    help="Name of a file inside custom-lists/ containing one Divar ID per line",
+)
+parser.add_argument(
+    "--bbox",
+    dest="bbox_config",
+    help="Name of a file inside bbox_configs/ containing bbox values",
+)
+parser.add_argument(
+    "--test",
+    action="store_true",
+    help="Run in test mode with a single property",
 )
 args = parser.parse_args()
 
@@ -84,7 +96,9 @@ def load_tokens_from_file(listname: str) -> list[str]:
 
 
 # --- API Fetch Function ---
-async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
+async def fetch_divar_listings(
+    session, page=1, last_sort_date_cursor=None, bbox_config=None
+):
     """Fetches a page of listings from the Divar API using the last sort_date."""
     payload = {
         "city_ids": [TARGET_CITY_ID],
@@ -93,13 +107,13 @@ async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
         "map_state": {
             "camera_info": {
                 "bbox": {
-                    "min_latitude": 35.56,
-                    "min_longitude": 51.1,
-                    "max_latitude": 35.84,
-                    "max_longitude": 51.61,
+                    "min_latitude": 35.74,
+                    "min_longitude": 51.30,
+                    "max_latitude": 35.74,
+                    "max_longitude": 51.31,
                 },
                 "place_hash": f"{TARGET_CITY_ID}||real-estate",
-                "zoom": 9.8,
+                "zoom": 14.568499456622654,
             },
             "page_state": "HALF_STATE",
             "interaction": {"list_only_used": {}},
@@ -114,6 +128,12 @@ async def fetch_divar_listings(session, page=1, last_sort_date_cursor=None):
             },
         },
     }
+
+    # Override bbox values if provided
+    if bbox_config:
+        payload["map_state"]["camera_info"]["bbox"] = bbox_config
+        logging.info(f"Using custom bbox configuration: {bbox_config}")
+
     if last_sort_date_cursor:
         server_payload = payload["search_data"]["server_payload"]
         if "additional_form_data" not in server_payload:
@@ -331,12 +351,12 @@ async def crawl_and_save_property(
 # --- Main Orchestration ---
 async def main():
     """Main orchestration function."""
-    db_pool_instance = await init_db_pool()  # Initialize the pool
+    # Initialize database and storage
+    db_pool_instance = await init_db_pool()
 
+    # Initialize storage manager if enabled
     load_dotenv()
-    supabase_url = os.getenv(
-        "SUPABASE_STORAGE_URL", "http://127.0.0.1:54321"
-    )  # Local Supabase port
+    supabase_url = os.getenv("SUPABASE_STORAGE_URL", "http://127.0.0.1:54321")
     supabase_key = os.getenv("SUPABASE_ROLE")
     if not supabase_key:
         logging.warning("SUPABASE_KEY not set in environment. Image storage disabled.")
@@ -356,255 +376,141 @@ async def main():
         await es_indexer.init_client()
         # Get delete_existing parameter from environment variable (default to False)
         delete_existing = os.getenv("DELETE_ES_INDEXES", "False").lower() == "true"
-
         await es_indexer.create_indexes(delete_existing=delete_existing)
         logging.info("Elasticsearch initialized successfully")
     except Exception as e:
         logging.error(f"Failed to initialize Elasticsearch: {e}")
-        # You can decide whether to continue without Elasticsearch or exit
-        # For now, let's continue but with a warning
         logging.warning("Continuing without Elasticsearch indexing...")
 
-    # Test mode configuration
-    TEST_MODE = True  # Changed to False to test actual crawling
-    TEST_TOKEN = "Aae8wB29"
-    API_ONLY_TEST = False
-
-    if TEST_MODE:
+    # Test mode
+    if args.test:
         logging.info("=== RUNNING IN TEST MODE ===")
+        TEST_TOKEN = "Aa8EDApT"  # Default test token
 
-        if API_ONLY_TEST:
-            # API calls also use proxy via environment
-            os.environ["HTTP_PROXY"] = PROXY_URL
-            os.environ["HTTPS_PROXY"] = PROXY_URL
+        # API calls also use proxy via environment
+        os.environ["HTTP_PROXY"] = PROXY_URL
+        os.environ["HTTPS_PROXY"] = PROXY_URL
+
+        browser_config = BrowserConfig(
+            browser_type="chromium",
+            headless=False,
+            proxy=PROXY_URL,
+            viewport_width=random.randint(1200, 1400),
+            viewport_height=random.randint(800, 1000),
+            user_agent="random",
+            verbose=True,
+        )
+
+        async with AsyncWebCrawler(config=browser_config) as crawler:
             await crawl_and_save_property(
-                None,
+                crawler,
                 db_pool_instance,
                 TEST_TOKEN,
                 "test-slug",
                 storage_manager=storage_manager,
-                api_only=True,
+                api_only=False,
             )
-        else:
-            browser_config = BrowserConfig(
-                browser_type="chromium",
-                headless=False,
-                proxy=PROXY_URL,  # Add your proxy here
-                viewport_width=random.randint(1200, 1400),
-                viewport_height=random.randint(800, 1000),
-                user_agent="random",
-                verbose=True,
-            )
-
-            async with AsyncWebCrawler(config=browser_config) as crawler:
-                await crawl_and_save_property(
-                    crawler,
-                    db_pool_instance,
-                    TEST_TOKEN,
-                    "test-slug",
-                    storage_manager=storage_manager,
-                    api_only=False,
-                )
 
         logging.info("=== TEST MODE COMPLETED ===")
-        # After TEST_MODE finishes, clean up and exit
+
+        # Clean up and exit
         if db_pool_instance:
             await close_db_pool()
         await es_indexer.close_client()
         return
 
-    # If TEST_MODE is False, check for a custom‐list argument
-    if args.listname:
-        tokens = load_tokens_from_file(args.listname)
-        if not tokens:
-            logging.error("No tokens to crawl. Exiting.")
-            # Clean up and return
-            if db_pool_instance:
-                await close_db_pool()
-            await es_indexer.close_client()
-            return
-
-        logging.info(
-            f"Crawling a custom list of {len(tokens)} tokens from custom-lists/{args.listname}"
-        )
-        browser_config_main = BrowserConfig(headless=True, verbose=False)
-        async with AsyncWebCrawler(config=browser_config_main) as crawler:
-            for token in tokens:
-                slug = quote(token)  # generate a safe slug; token itself is fine too
-                await crawl_and_save_property(
-                    crawler,
-                    db_pool_instance,
-                    token,
-                    slug,
-                    storage_manager=storage_manager,
-                    api_only=False,
-                )
-
-        # After finishing the custom list, clean up and exit
-        if db_pool_instance:
-            await close_db_pool()
-        await es_indexer.close_client()
-        logging.info("Custom‐list crawling complete. Exiting.")
-        return
-
-    # --- If no custom list is provided, proceed with the original pagination logic ---
-
-    # For API calls, also set environment variables
+    # Set environment variables for API calls
     os.environ["HTTP_PROXY"] = PROXY_URL
     os.environ["HTTPS_PROXY"] = PROXY_URL
 
-    # Anti-detection measures
-    # Regular crawling with proxy
-    browser_config = BrowserConfig(
+    # Process tokens from a custom list if provided
+    tokens_to_crawl = set()
+    if args.listname:
+        custom_tokens = load_tokens_from_file(args.listname)
+        tokens_to_crawl.update(custom_tokens)
+        logging.info(
+            f"Loaded {len(custom_tokens)} tokens from custom list '{args.listname}'"
+        )
+
+    # Process tokens from a bounding box if provided
+    if args.bbox_config:
+        bbox_config = load_bbox_config(args.bbox_config)
+        if not bbox_config:
+            logging.error(f"Failed to load bbox configuration: {args.bbox_config}")
+            if (
+                not tokens_to_crawl
+            ):  # Only exit if we don't have any tokens from custom list
+                if db_pool_instance:
+                    await close_db_pool()
+                await es_indexer.close_client()
+                return
+        else:
+            # Fetch properties from viewport API
+            async with aiohttp.ClientSession() as http_session:
+                viewport_data = await fetch_viewport_listings(http_session, bbox_config)
+                viewport_tokens = extract_tokens_from_viewport_response(viewport_data)
+
+                if viewport_tokens:
+                    tokens_to_crawl.update(viewport_tokens)
+                    logging.info(
+                        f"Added {len(viewport_tokens)} tokens from bbox '{args.bbox_config}'"
+                    )
+                else:
+                    logging.error("No tokens found in the specified bounding box")
+
+    # Exit if we don't have any tokens to crawl
+    if not tokens_to_crawl:
+        logging.error("No tokens to crawl. Exiting.")
+        if db_pool_instance:
+            await close_db_pool()
+        await es_indexer.close_client()
+        return
+
+    logging.info(f"Preparing to crawl {len(tokens_to_crawl)} unique tokens")
+
+    # Configure browser for crawling
+    browser_config_main = BrowserConfig(
         browser_type="chromium",
         headless=True,
-        proxy=PROXY_URL,  # Add your proxy here
+        proxy=PROXY_URL,
         viewport_width=random.randint(1200, 1400),
         viewport_height=random.randint(800, 1000),
         user_agent="random",
         verbose=False,
     )
 
-    # Anti-detection crawler run config
-    run_config = CrawlerRunConfig(
-        cache_mode=CacheMode.BYPASS,
-        page_timeout=random.randint(25000, 35000),  # Random timeout
-        delay_before_return_html=random.uniform(2.0, 4.0),  # Random delay
-        mean_delay=random.uniform(5.0, 10.0),  # Random delay between pages
-        max_range=random.uniform(2.0, 5.0),  # Random variation
-        scan_full_page=True,
-        scroll_delay=random.uniform(0.3, 0.8),  # Random scroll delay
-        remove_overlay_elements=True,
-        simulate_user=True,  # Simulate human behavior
-        js_code=[
-            f"await new Promise(resolve => setTimeout(resolve, {random.randint(1000, 3000)}));",
-            "window.scrollTo(0, document.body.scrollHeight);",
-            f"await new Promise(resolve => setTimeout(resolve, {random.randint(500, 1500)}));",
-            "window.scrollTo(0, 0);",
-        ],
-        wait_for="css:div.kt-page-title, h1[class*='kt-page-title__title'], div.kt-carousel__cell",
-        magic=True,
-    )
+    # Crawl the tokens
+    async with AsyncWebCrawler(config=browser_config_main) as crawler:
+        # Use a semaphore to limit concurrent crawls
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_CRAWLS)
+        tasks = []
 
-    next_page_cursor = None
-    crawled_tokens = set()
-    total_properties_processed = 0
-    browser_config_main = BrowserConfig(headless=True, verbose=False)
-
-    try:
-        async with AsyncWebCrawler(
-            config=browser_config_main
-        ) as crawler, aiohttp.ClientSession() as http_session:
-
-            for page_num in range(1, PAGES_TO_CRAWL + 1):
-                listings_data = await fetch_divar_listings(
-                    http_session, page=page_num, last_sort_date_cursor=next_page_cursor
+        async def crawl_with_semaphore(token, current_pool):
+            async with semaphore:
+                slug = quote(token)  # Generate a safe slug
+                await crawl_and_save_property(
+                    crawler,
+                    current_pool,
+                    token,
+                    slug,
+                    storage_manager=storage_manager,
+                    api_only=False,
                 )
 
-                if not listings_data:
-                    logging.warning(
-                        f"Stopping crawl: No listings data from page {page_num}."
-                    )
-                    break
-                if "list_widgets" not in listings_data:
-                    logging.warning(
-                        f"API response for page {page_num} missing 'list_widgets'."
-                    )
-                    break
+        for token in tokens_to_crawl:
+            tasks.append(crawl_with_semaphore(token, db_pool_instance))
 
-                property_widgets = [
-                    w
-                    for w in listings_data.get("list_widgets", [])
-                    if w.get("widget_type") == "POST_ROW"
-                ]
+        await asyncio.gather(*tasks)
 
-                if not property_widgets:
-                    logging.info(f"No 'POST_ROW' widgets on page {page_num}.")
-                    last_sort_date_cursor = None
-                    try:
-                        last_widget_action_log = listings_data["list_widgets"][-1].get(
-                            "action_log", {}
-                        )
-                        sort_date_cursor = last_widget_action_log["server_side_info"][
-                            "info"
-                        ]["sort_date"]
-                        if sort_date_cursor:
-                            next_page_cursor = sort_date_cursor
-                    except (KeyError, IndexError, TypeError):
-                        pass
-                    if not next_page_cursor and page_num < PAGES_TO_CRAWL:
-                        logging.warning("No props & no pagination cursor. Stopping.")
-                        break
-                    continue
+    # Clean up
+    if db_pool_instance:
+        await close_db_pool()
+    await es_indexer.close_client()
 
-                semaphore = asyncio.Semaphore(MAX_CONCURRENT_CRAWLS)
-                tasks = []
-
-                async def crawl_with_semaphore_wrapper(widget, current_pool):
-                    async with semaphore:
-                        widget_data = widget.get("data", {})
-                        action_payload = widget_data.get("action", {}).get(
-                            "payload", {}
-                        )
-                        token = action_payload.get("token")
-                        web_info = action_payload.get("web_info", {})
-                        raw_slug = web_info.get("title", f"property-{token}")
-                        safe_slug = quote(raw_slug.replace(" ", "-"))
-
-                        if token and token not in crawled_tokens:
-                            crawled_tokens.add(token)
-                            await crawl_and_save_property(
-                                crawler,
-                                current_pool,
-                                token,
-                                safe_slug,
-                                storage_manager=storage_manager,
-                            )
-                        elif token:
-                            logging.debug(f"Token {token} already processed. Skipping.")
-
-                for widget in property_widgets:
-                    tasks.append(crawl_with_semaphore_wrapper(widget, db_pool_instance))
-
-                await asyncio.gather(*tasks)
-                total_properties_processed = len(crawled_tokens)
-
-                # Determine cursor for NEXT page from the last widget of THIS page
-                last_widget = property_widgets[-1]
-                try:
-                    sort_date_cursor = last_widget["action_log"]["server_side_info"][
-                        "info"
-                    ]["sort_date"]
-                    if sort_date_cursor:
-                        next_page_cursor = sort_date_cursor
-                    else:
-                        next_page_cursor = None
-                        logging.warning(
-                            f"Could not extract sort_date from last item on page {page_num}."
-                        )
-                except (KeyError, IndexError, TypeError) as e:
-                    next_page_cursor = None
-                    logging.error(f"Error extracting sort_date: {e}")
-
-                logging.info(f"Next page cursor for fetch: {next_page_cursor}")
-                if not next_page_cursor and page_num < PAGES_TO_CRAWL:
-                    logging.warning(f"No next page cursor. Stopping.")
-                    break
-                await asyncio.sleep(1.5)
-
-    except Exception as e:
-        logging.error(
-            f"An error occurred during the main crawl loop: {e}", exc_info=True
-        )
-    finally:
-        if db_pool_instance:
-            await close_db_pool()
-        # Close Elasticsearch client
-        await es_indexer.close_client()
-        logging.info(
-            f"Crawling finished or stopped. Processed {len(crawled_tokens)} unique properties."
-        )
-        logging.info(f"Check the '{JSON_OUTPUT_DIR}' directory for saved JSON files.")
+    logging.info(
+        f"Crawling completed. Processed {len(tokens_to_crawl)} unique properties."
+    )
+    logging.info(f"Check the '{JSON_OUTPUT_DIR}' directory for saved JSON files.")
 
 
 # --- Script Entry Point ---

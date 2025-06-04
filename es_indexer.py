@@ -347,6 +347,50 @@ class DivarElasticsearchIndexer:
             # Remove None values
             doc = {k: v for k, v in doc.items() if v is not None}
 
+            if "property_type_suggest" in doc:
+                if "contexts" in doc["property_type_suggest"]:
+                    for context_name, context_values in doc["property_type_suggest"][
+                        "contexts"
+                    ].items():
+                        # Remove null values from context arrays
+                        doc["property_type_suggest"]["contexts"][context_name] = [
+                            value
+                            for value in context_values
+                            if value is not None and value != ""
+                        ]
+                        # If the array is now empty, provide a default value
+                        if not doc["property_type_suggest"]["contexts"][context_name]:
+                            if context_name == "location":
+                                doc["property_type_suggest"]["contexts"][
+                                    context_name
+                                ] = ["تهران"]
+                            else:
+                                doc["property_type_suggest"]["contexts"][
+                                    context_name
+                                ] = ["unknown"]
+
+            if "bedrooms_suggest" in doc:
+                if "contexts" in doc["bedrooms_suggest"]:
+                    for context_name, context_values in doc["bedrooms_suggest"][
+                        "contexts"
+                    ].items():
+                        # Remove null values from context arrays
+                        doc["bedrooms_suggest"]["contexts"][context_name] = [
+                            value
+                            for value in context_values
+                            if value is not None and value != ""
+                        ]
+                        # If the array is now empty, provide a default value
+                        if not doc["bedrooms_suggest"]["contexts"][context_name]:
+                            if context_name == "property_type":
+                                doc["bedrooms_suggest"]["contexts"][context_name] = [
+                                    "نامشخص"
+                                ]
+                            else:
+                                doc["bedrooms_suggest"]["contexts"][context_name] = [
+                                    "unknown"
+                                ]
+
             # Index the document
             self.es.index(
                 index=self.property_index,
@@ -370,6 +414,8 @@ class DivarElasticsearchIndexer:
     def _extract_location(self, property_data: Dict) -> Dict:
         """Extract and structure location data"""
         location = property_data.get("p_location", {})
+        result = {"city": "تهران"}  # Default value
+
         if isinstance(location, str):
             try:
                 # Try to parse JSON string
@@ -379,19 +425,33 @@ class DivarElasticsearchIndexer:
                     # Parse location string if it's a string
                     parts = location.split(",")
                     if len(parts) >= 2:
-                        return {
+                        result = {
                             "neighborhood": parts[0].strip(),
                             "district": parts[1].strip() if len(parts) > 1 else None,
                             "city": "تهران",  # Default to Tehran for now
-                            "coordinates": None,  # Can be added later if available
                         }
             except:
                 pass
-
         elif isinstance(location, dict):
-            return location
+            result = location
 
-        return {"city": "تهران"}
+        # Handle coordinates if available
+        if (
+            property_data.get("p_latitude") is not None
+            and property_data.get("p_longitude") is not None
+        ):
+            try:
+                result["coordinates"] = {
+                    "lat": float(property_data["p_latitude"]),
+                    "lon": float(property_data["p_longitude"]),
+                }
+            except (ValueError, TypeError):
+                # Log error if conversion fails
+                logging.error(
+                    f"Could not convert coordinates for property {property_data.get('p_external_id')}: lat={property_data.get('p_latitude')}, lon={property_data.get('p_longitude')}"
+                )
+
+        return result
 
     async def _fetch_property_images(self, external_id: str, db_conn) -> List[str]:
         """Fetch property images from database"""

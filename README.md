@@ -5,13 +5,14 @@ This project uses `crawl4ai` to scrape real estate listings from Divar.ir for Te
 ## Features
 
 - Fetches listing tokens from Divar's search API.
+- Supports bounding box (map area) based crawling for targeted neighborhood scraping.
 - Crawls individual property detail pages using `crawl4ai`.
 - Parses relevant data (title, description, images, location, attributes, price) from detail page HTML.
 - Transforms data and inserts it into a PostgreSQL database using asyncpg.
 - Leverages PostgreSQL functions defined in migrations for structured data insertion.
-- Includes basic pagination logic for the listing API.
 - Uses environment variables for database configuration.
-- **Elasticsearch integration for fast search and autocomplete functionality**
+- **Elasticsearch integration for fast search and autocomplete functionality.**
+- **Supabase Storage integration for image storage.**
 
 ## Setup
 
@@ -49,23 +50,130 @@ This project uses `crawl4ai` to scrape real estate listings from Divar.ir for Te
 5.  **Configure Environment Variables:**
     - Create a `.env` file in the project root directory.
     - Add your PostgreSQL connection string and Elasticsearch configuration:
+
       ```dotenv
       DATABASE_URL=postgresql://YOUR_USER:YOUR_PASSWORD@YOUR_HOST:YOUR_PORT/YOUR_DB_NAME
       ELASTICSEARCH_URL=http://localhost:9200
       DELETE_ES_INDEXES=true
+
+      # Supabase Storage (optional)
+      SUPABASE_STORAGE_URL=http://127.0.0.1:54321
+      SUPABASE_KEY=your_anon_key_here
+      SUPABASE_ROLE=your_service_role_key_here
       ```
 
 ## Running the Crawler
 
-Execute the main script:
+The crawler supports three main crawling approaches:
+
+1. **Targeted Area Crawling** (recommended): Crawl properties within a specific map area using bounding box coordinates
+2. **Custom List Crawling**: Crawl a list of specific property IDs
+3. **Test Mode**: Crawl a single property for testing
+
+### Targeted Area Crawling
+
+This approach lets you crawl all properties within a specific geographic area (neighborhood, district, etc.).
+
+#### Step 1: Create a Bounding Box Configuration
+
+Create a bounding box configuration from a Divar URL:
 
 ```bash
-python3.12 -m venv venv && source venv/bin/activate && python3.12 main.py
+python create_bbox_config.py --url "https://divar.ir/s/iran/buy-residential?bbox=51.3005066%2C35.7437935%2C51.3155823%2C35.7472916&cities=1%2C1708&map_place_hash=1%2C1708%7C%7Cresidential-sell" --name mantaghe5-pajuhande.json
 ```
 
-## Update real estate properties
+This will create a file in the `bbox_configs/` directory with the coordinates extracted from the URL.
 
-When crawling divar the type remains NULL. Use the following function to fix that:
+**TIP:** To get this URL:
+
+1. Go to Divar.ir and navigate to the map view
+2. Zoom to your desired area
+3. Copy the URL from your browser
+4. Paste it into the command above
+
+#### Step 2: Run the Crawler with the Bounding Box
+
+```bash
+source .env && python3.12 main.py --bbox mantaghe5-pajuhande.json
+```
+
+This will crawl all properties within the specified area.
+
+### Custom List Crawling
+
+If you have specific Divar property IDs you want to crawl:
+
+#### Step 1: Create a Custom List File
+
+Create a file in the `custom-lists/` directory with one Divar ID per line:
+
+```
+# File: custom-lists/premium-properties.txt
+Aa7Mvffn
+Aa9cJxBm
+Aayo9F4L
+AakIWY9p
+```
+
+#### Step 2: Run the Crawler with the Custom List
+
+```bash
+source .env && python3.12 main.py --list premium-properties.txt
+```
+
+### Combined Approach
+
+You can combine both approaches to crawl both a specific area and a custom list:
+
+```bash
+source .env && python3.12 main.py --bbox mantaghe5-pajuhande.json --list premium-properties.txt
+```
+
+### Test Mode
+
+To test the crawler with a single property:
+
+```bash
+source .env && python3.12 main.py --test
+```
+
+## Command Line Arguments
+
+| Argument      | Description                                                |
+| ------------- | ---------------------------------------------------------- |
+| `--bbox FILE` | Name of a file in bbox_configs/ containing map coordinates |
+| `--list FILE` | Name of a file in custom-lists/ with Divar IDs             |
+| `--test`      | Run in test mode with a single property                    |
+
+## Creating Custom Bounding Boxes
+
+### Method 1: Using create_bbox_config.py (Recommended)
+
+Extract coordinates directly from a Divar map URL:
+
+```bash
+python create_bbox_config.py --url "DIVAR_URL_WITH_BBOX_PARAMETER" --name area_name.json
+```
+
+### Method 2: Manual Creation
+
+Create a JSON file in `bbox_configs/` with the following structure:
+
+```json
+{
+  "min_latitude": 35.743794,
+  "min_longitude": 51.300506,
+  "max_latitude": 35.747293,
+  "max_longitude": 51.315583,
+  "zoom": 14.568499456622654
+}
+```
+
+## Post-Processing Real Estate Properties
+
+### Type Classification
+
+After crawling, property types may be NULL. Use this SQL function to update them:
 
 ```sql
 UPDATE public.properties

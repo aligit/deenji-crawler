@@ -103,8 +103,8 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
         price = property_data.get("p_price")
         price_per_meter = property_data.get("p_price_per_meter")
         bedrooms = property_data.get("p_bedrooms")
-        area = property_data.get("p_area")  # Explicitly pass area
-        year_built = property_data.get("p_year_built")  # Explicitly pass year_built
+        area = property_data.get("p_area")
+        year_built = property_data.get("p_year_built")
         investment_score = property_data.get("p_investment_score")
         neighborhood_fit_score = property_data.get("p_neighborhood_fit_score")
         rent_to_price_ratio = property_data.get("p_rent_to_price_ratio")
@@ -121,44 +121,19 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
         has_storage = bool(property_data.get("p_has_storage", False))
         has_balcony = bool(property_data.get("p_has_balcony", False))
 
-        # NEW: Geospatial parameters (extract from location JSON if available)
-        longitude = None
-        latitude = None
-        if property_data.get("p_location"):
-            try:
-                location_dict = (
-                    json.loads(location_json)
-                    if isinstance(location_json, str)
-                    else property_data.get("p_location")
-                )
-                if isinstance(location_dict, dict):
-                    longitude = location_dict.get("longitude")
-                    latitude = location_dict.get("latitude")
-                    # Convert to float if they're strings
-                    if longitude is not None:
-                        longitude = float(longitude)
-                    if latitude is not None:
-                        latitude = float(latitude)
-            except (json.JSONDecodeError, ValueError, TypeError) as e:
-                logging.warning(
-                    f"[{external_id}] Could not extract coordinates from location: {e}"
-                )
+        # Geospatial parameters
+        longitude = property_data.get("p_longitude")
+        latitude = property_data.get("p_latitude")
 
         logging.debug(f"[{external_id}] Calling insert_property_direct with data...")
         logging.debug(
-            f"[{external_id}] Numeric values: bedrooms={bedrooms}, area={area}, year_built={year_built}"
-        )
-        logging.debug(
-            f"[{external_id}] Boolean values: parking={has_parking}, storage={has_storage}, balcony={has_balcony}"
-        )
-        logging.debug(
-            f"[{external_id}] Text attributes: bathroom_type={bathroom_type}, heating_system={heating_system}"
+            f"[{external_id}] Numeric values: price={price}, bedrooms={bedrooms}, area={area}, year_built={year_built}"
         )
         logging.debug(
             f"[{external_id}] Geospatial: longitude={longitude}, latitude={latitude}"
         )
 
-        # Updated function call with 27 parameters
+        # Call the stored procedure as before
         result_id = await conn.fetchval(
             """
             SELECT insert_property_direct(
@@ -184,22 +159,46 @@ async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
             has_parking,
             has_storage,
             has_balcony,
-            bedrooms,  # Parameter 18
-            bathroom_type,  # Parameter 19
-            heating_system,  # Parameter 20
-            cooling_system,  # Parameter 21
-            floor_material,  # Parameter 22
-            hot_water_system,  # Parameter 23
-            area,  # Parameter 24
-            year_built,  # Parameter 25
-            longitude,  # Parameter 26 - NEW
-            latitude,  # Parameter 27 - NEW
+            bedrooms,
+            bathroom_type,
+            heating_system,
+            cooling_system,
+            floor_material,
+            hot_water_system,
+            area,
+            year_built,
+            longitude,
+            latitude,
         )
+
+        # If we have coordinates and a valid result_id, update the PostGIS geometry
+        if result_id and longitude is not None and latitude is not None:
+            try:
+                await conn.execute(
+                    """
+                    UPDATE properties 
+                    SET geom = ST_SetSRID(ST_MakePoint($1, $2), 4326)
+                    WHERE id = $3
+                    """,
+                    longitude,
+                    latitude,
+                    result_id,
+                )
+                logging.debug(
+                    f"[{external_id}] Updated geometry for property ID {result_id} "
+                    f"with coordinates: {longitude}, {latitude}"
+                )
+            except Exception as e:
+                logging.warning(
+                    f"[{external_id}] Failed to update geometry for property ID {result_id}: {e}"
+                )
+                # Don't fail the whole operation if geometry update fails
 
         logging.info(
             f"[{external_id}] Successfully saved/updated property. DB ID: {result_id}"
         )
         return result_id
+
     except asyncpg.exceptions.UniqueViolationError:
         logging.warning(
             f"[{external_id}] Property already exists. Skipping or update handled by DB."
