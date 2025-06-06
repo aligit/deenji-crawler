@@ -233,6 +233,34 @@ class DivarElasticsearchIndexer:
     async def index_property(self, property_data: Dict, db_conn):
         """Index a single property with improved attribute handling"""
         try:
+            # Extract coordinates first
+            location = self._extract_location(property_data)
+
+            # Check for existing document with same coordinates if coordinates exist
+            if location.get("coordinates"):
+                lat = location["coordinates"]["lat"]
+                lon = location["coordinates"]["lon"]
+
+                # Search for existing property with same coordinates
+                search_query = {
+                    "query": {
+                        "geo_distance": {
+                            "distance": "1m",  # 1 meter radius
+                            "location.coordinates": {"lat": lat, "lon": lon},
+                        }
+                    }
+                }
+
+                response = self.es.search(index=self.property_index, body=search_query)
+
+                if response["hits"]["total"]["value"] > 0:
+                    existing = response["hits"]["hits"][0]["_source"]
+                    logging.warning(
+                        f"[{property_data.get('p_external_id')}] Property with same coordinates already indexed: "
+                        f"{existing.get('external_id')}. Skipping indexing."
+                    )
+                    return
+
             # Prepare document with direct field mapping
             doc = {
                 "external_id": property_data.get("p_external_id"),
@@ -261,7 +289,7 @@ class DivarElasticsearchIndexer:
                 "image_urls": await self._fetch_property_images(
                     property_data.get("p_external_id", ""), db_conn
                 ),
-                "location": self._extract_location(property_data),
+                "location": location,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
             }
@@ -435,20 +463,23 @@ class DivarElasticsearchIndexer:
         elif isinstance(location, dict):
             result = location
 
-        # Handle coordinates if available
-        if (
-            property_data.get("p_latitude") is not None
-            and property_data.get("p_longitude") is not None
-        ):
+        # Handle coordinates - The data comes from the database with p_ prefix
+        lat = property_data.get("p_latitude")
+        lon = property_data.get("p_longitude")
+
+        if lat is not None and lon is not None:
             try:
                 result["coordinates"] = {
-                    "lat": float(property_data["p_latitude"]),
-                    "lon": float(property_data["p_longitude"]),
+                    "lat": float(lat),
+                    "lon": float(lon),
                 }
+                logging.info(
+                    f"Successfully extracted coordinates for property {property_data.get('p_external_id')}: lat={lat}, lon={lon}"
+                )
             except (ValueError, TypeError):
                 # Log error if conversion fails
                 logging.error(
-                    f"Could not convert coordinates for property {property_data.get('p_external_id')}: lat={property_data.get('p_latitude')}, lon={property_data.get('p_longitude')}"
+                    f"Could not convert coordinates for property {property_data.get('p_external_id')}: lat={lat}, lon={lon}"
                 )
 
         return result

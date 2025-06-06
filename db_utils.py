@@ -81,6 +81,32 @@ async def close_db_pool():
 async def save_property_to_db(conn: asyncpg.Connection, property_data: dict):
     """Calls the improved insert_property_direct function in PostgreSQL with explicit parameter passing."""
     external_id = property_data.get("p_external_id")
+
+    # Check for duplicate coordinates before inserting
+    longitude = property_data.get("p_longitude")
+    latitude = property_data.get("p_latitude")
+
+    if longitude is not None and latitude is not None:
+        # Check if property with same coordinates already exists
+        existing_property = await conn.fetchrow(
+            """
+            SELECT external_id, title, created_at 
+            FROM properties 
+            WHERE latitude = $1 AND longitude = $2
+            LIMIT 1
+            """,
+            latitude,
+            longitude,
+        )
+
+        if existing_property:
+            logging.warning(
+                f"[{external_id}] Property with same coordinates already exists: "
+                f"{existing_property['external_id']} (created: {existing_property['created_at']}). "
+                f"Skipping insertion."
+            )
+            return None
+
     try:
         # JSON formatting and None handling
         location_json = (

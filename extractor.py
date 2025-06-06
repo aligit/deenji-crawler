@@ -451,29 +451,23 @@ async def extract_property_details(
 
             # Extract location data if available in API response
             try:
-                # Extract latitude and longitude from MAP section
+                # Extract latitude and longitude from API response
                 latitude = None
                 longitude = None
 
-                # Look for MAP section
-                for section in api_data.get("sections", []):
-                    if section.get("section_name") == "MAP":
-                        for widget in section.get("widgets", []):
-                            if widget.get("widget_type") == "MAP_ROW":
-                                location_data = widget.get("data", {}).get(
-                                    "location", {}
-                                )
-                                exact_data = location_data.get("exact_data", {})
-                                point = exact_data.get("point", {})
+                # Look for coordinates in seo.post_seo_schema.geo
+                seo_data = api_data.get("seo", {})
+                post_seo_schema = seo_data.get("post_seo_schema", {})
+                geo_data = post_seo_schema.get("geo", {})
 
-                                latitude = point.get("latitude")
-                                longitude = point.get("longitude")
+                if geo_data:
+                    latitude = geo_data.get("latitude")
+                    longitude = geo_data.get("longitude")
 
-                                if latitude and longitude:
-                                    logging.info(
-                                        f"[{token}] Found location coordinates: lat={latitude}, lon={longitude}"
-                                    )
-                                    break
+                    if latitude and longitude:
+                        logging.info(
+                            f"[{token}] Found location coordinates: lat={latitude}, lon={longitude}"
+                        )
 
                 # Add location coordinates to details if found
                 if latitude and longitude:
@@ -518,10 +512,6 @@ async def extract_property_details(
     except Exception as e:
         logging.error(f"[{token}] Error during extraction: {e}", exc_info=True)
         return None
-
-
-# Add this to the transform_for_db function after initializing db_data
-# Update transform_for_db function in extractor.py
 
 
 def transform_for_db(extracted_data: dict) -> dict | None:
